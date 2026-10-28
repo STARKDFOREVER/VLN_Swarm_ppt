@@ -1,0 +1,616 @@
+AI-Enabled Robotics; Field Robots; Human-Robot Collaboration; Multi-Robot Systems; Search and Rescue Robots; Semantic Scene Understanding; Task Planning.
+
+Air-Ground Collaboration for Language-Specified Missions in Unknown Environments
+
+As autonomous robotic systems become increasingly mature, users will want to specify missions at the level of intent rather than in low-level detail.
+Language is an expressive and intuitive medium for such mission specification.
+However, realizing language-guided robotic teams requires overcoming significant technical hurdles.
+Interpreting and realizing language-specified missions requires advanced semantic reasoning.
+Successful heterogeneous robots must effectively coordinate actions and share information across varying viewpoints.
+Additionally, communication between robots is typically intermittent, necessitating robust strategies that leverage communication opportunities to maintain coordination and achieve mission objectives.
+In this work, we present a first-of-its-kind system where an unmanned aerial vehicle (UAV) and an unmanned ground vehicle (UGV) are able to collaboratively accomplish missions specified in natural language while reacting to changes in specification on the fly.
+We leverage a Large Language Model (LLM)-enabled planner to reason over semantic-metric maps that are built online and opportunistically shared between an aerial and a ground robot.
+We consider task-driven navigation in urban and rural areas. Our system must infer mission-relevant semantics and actively acquire information via semantic mapping.
+In both ground and air-ground teaming experiments, we demonstrate our system on seven different natural-language specifications at up to kilometer-scale navigation.
+
+Figure 1: Example mission specification. The UAV and UGVs start their mission in the same location. The UGVs can task the UAV with a list of labels to look for. Once it receives a graph, the UGVs can plan on the UAV map, looking for objects of interest. Satellite image in the background is only provided for representation purposes.
+
+1 INTRODUCTION
+
+Exploration of unknown unstructured environments is one of the quintessential field robotics applications, with applications to infrastructure inspection [ 1 ] , search and rescue [ 2 ] , disaster response [ 3 ] , law enforcement [ 4 ] , and crop inspection [ 5 ] , among others.
+Heterogeneous teams of aerial and ground robots have a distinct advantage for fast exploration missions, by providing complementary capabilities compared to a team of identical robots.
+
+For example, UAVs flying at high altitudes move in an obstacle-free space; thus, they can achieve higher speeds and
+provide an elevated vantage point. UAVs can trade off resolution for altitude and fly higher when a fast scene overview is required.
+Moreover, high-altitude UAVs can act as obstacle-free communication nodes, achieving line-of-sight with other nodes on the ground.
+Unfortunately, the low size, weight, and power (SWaP) constraints on UAVs restrict the payload, compute, and operation time of UAVs .
+Contrarily, UGVs are not affected by these power limitations: they can carry heavier payloads and operate for extended periods.
+However, UGVs speed is limited as they have to plan trajectories to avoid static and dynamic obstacles and consider the traversability of the terrain where they operate.
+
+Liu et al. [ 6 ] identified different roles UAVs and UGVs perform in a team, such as sensor, actuator or auxiliary. We focus on applications where UAVs and UGVs act cooperatively to perform a mission .
+However, in most examples of the literature [ 6 ] , the tasks are pre-defined for the robots. For instance, UAVs may be used for to localize ground robots [ 7 ] or generate maps and traversability information [ 8 ] . Miller et al. [ 9 ] were one of the first to use UAVs in a multi-role setting, where the UAV generated a map and acted as an active communication relay [ 10 ] .
+
+Still, the state of the art is far from a seamless collaboration of aerial and ground robots, where tasks are not pre-encoded.
+For example, leading systems in the DARPA SubT challenge, including Nebula [ 11 ] and Cerberus [ 12 ] , were designed for object search over a specific semantic set.
+Recent literature proposes planners for language-specified tasks in single-robot, small-scale, structured environments ( e.g., indoors) [ 13 , 14 , 15 ] .
+However, such work assumes favorable conditions, including near-perfect environment knowledge and perfect communications [ 16 ] .
+
+As autonomous robotic systems become increasingly mature, we envision a heterogeneous robotic team that users can task at the level of intent rather than detailed and step-by-step instructions.
+Given a user’s mission specification, the robot team would infer the required subtasks, reason about each platform’s constraints and abilities, and execute a plan suited to the environment of operation.
+Realizing this vision on robotic systems, and particularly air-ground robotics, remains a significant challenge.
+Existing literature generally assumes mission specifications are fixed.
+Creating planners that reason over dynamic mission specifications, where no task is pre-specified on either the aerial or ground vehicle, remains an open research question.
+Correspondingly, existing literature fix semantics upfront or only share metric information among robots.
+However, dynamically configuring semantics is a desirable property.
+Finally, robot mobility should not be limited by the communication network infrastructure, and robots should not need be in continuous communication range.
+Creating robot teams that leverage fully opportunistic communications is an ongoing challenge.
+
+This work builds upon our air-ground collaboration work [ 8 , 9 ] , including components of opportunistic communication [ 10 ] and language-driven planning [ 17 ] .
+We aim to address the challenges posed in [ 18 ] by proposing a language-driven air-ground teaming system with the following novel contributions :
+
+The first air-ground teaming system for language-specified missions in unknown environments.
+
+A decentralized and compact semantic mapping approach that enables the UAV and UGVs to share observations and dynamically set mission-relevant semantics of interest to map.
+
+We performed experimental validation and system deployment in kilometer-scale experiments in semi-urban and rural environments.
+An example mission scenario is shown in Fig. 1 .
+The supplementary material for this work is available online 1 1 1 http://tfr-air-ground.fcladera.com .
+
+Figure 2: System overview. Green lines represent information that is transmitted to and from MOCHA and thus are communicated to other robots in the system.
+
+2 RELATED WORK
+
+2.1 Air-ground Robot Teaming
+
+Cooperative air-ground collaboration in robotics has more than twenty years of development [ 6 ] .
+The initial works of Elfes et al. used robotics blimps to transmit aerial images to ground robots, which used them for visual navigation [ 19 ] .
+Other early works also use aerial vehicles for localization, tracking, and obstacle avoidance [ 7 , 20 , 21 ] .
+In these works, the UAV acts as an eye in the sky , providing information that compliments ground robot knowledge.
+One of the first examples of air-ground mapping is described in [ 3 ] and [ 22 ] , where a team of robots was deployed to assess the damages of historical buildings after earthquakes in Italy and Japan.
+These works proved the potential of air-ground teams in disaster scenarios by reducing the risk of rescue personnel.
+
+Most existing air-ground robot teaming literature focuses on static task assignments, where the robots’ tasks are pre-agreed.
+For example, the UAV provides aerial information for mapping or obstacle avoidance.
+In some works [ 10 , 9 ] , the UAV has multiple roles as a map provider and communication relay.
+Still, few works show an explicit tasking of the UAV - UGV team. In this work, we aim to address this issue by allowing the UGV to task the UAV towards an integrated semantic exploration task .
+
+2.2 Semantic Representations for Navigation
+
+Semantic planning requires representations that contain the contextual information for high-level planning and traversability information for lower-level control.
+The perception community has advanced online semantic planning for tasks such as active exploration and object search [ 23 , 24 , 9 , 25 ] .
+Most of the semantic mapping literature focuses on single-robot applications.
+In these works, scene graphs have emerged as a popular representation for semantic planning, as they capture objects, topology, and traversable regions.
+Hydra provides a real-time scene graph engine [ 26 ] designed for indoor environments.
+Strader et al. [ 27 ] relax this assumption.
+Topological maps are similar but do not include a hierarchy [ 28 , 29 ] .
+Recent work incorporates foundation models into mapping pipelines to create open-vocabulary representations.
+Mappers, including ConceptGraphs [ 30 ] , HOVSG [ 14 ] , and Clio [ 31 ] , assign semantic feature vectors to entities in the map. Semantic labels are then produced at runtime, depending on the task.
+
+Effective representations for multi-robot teaming share many of the aforementioned properties.
+One of the major additional challenges is that they require a consistent frame between robots.
+Consistent multi-robot state estimation is addressed by works such as Kimera-multi [ 32 ] .
+Similarly, Hydra-Multi builds scene graphs across a robot team via loop-closure detection and relative state estimation [ 33 ] .
+Alternatively, the SPOMP system addresses this problem with a semantics-based relative localization module [ 9 ] .
+However, this approach requires an orthomap to be constructed in real time and transmitted to the ground robots.
+Sparsity is another desirable property, as communication and compute may be limited, which this work addresses.
+
+This work introduces a sparse map representation shared by the UAV and UGV . We demonstrate how the UAV can build the map in real-time and how the UGV can use such representation to execute its mission while augmenting it with newly observed information.
+
+2.3 Language-specified mission planning
+
+Motivated by the increasing maturity and accessibility of LLMs, the robotics community has studied the use of language for specifying tasks and missions.
+LLM-enabled planners have been developed for mobile manipulation [ 16 , 13 , 34 ] , service robotics [ 35 ] , autonomous driving [ 36 ] , navigation [ 37 , 38 , 39 , 40 ] , and fault detection [ 41 , 42 ] These methods typically configure a pre-trained LLM, such as GPT-4 [ 43 ] , via in-context prompts.
+This approach avoids fine-tuning or retraining an LLM, which is computationally expensive, but it still channels the LLM’s common sense into a specific problem [ 44 ] .
+The LLM-enabled planner is then provided a set of behaviors such as graph navigation goals [ 36 ] , predicates in a formal planning language [ 15 ] , lower-level APIs for code generation [ 45 , 46 , 47 ] , or learned behaviors [ 13 ] .
+At runtime, the LLM is given an environment map, such as a graph [ 16 ] or semantic regions [ 44 ] .
+A line of research plans over formal languages such as Linear Temporal Logic (LTL) or Planning Domain Definition Language (PDDL) [ 48 , 15 , 49 , 50 , 51 , 52 , 53 ] .
+Recent literature also considers language-specified missions for multi-robot systems [ 54 , 55 , 56 , 57 , 58 ] .
+However, these works consider controlled simulation or closed-world manipulation environments with perfect or near-perfect environment knowledge.
+
+In the above approaches, instructions typically state the required subtasks and required semantics [ 59 ] .
+While works such as SayPlan consider less well-specified tasks (“find me something to drink”), they still assume pre-mapped or highly-structured indoor scenes [ 16 , 34 ] .
+Other research relaxes the requirement of a pre-built semantic map by incorporating feedback from perception systems [ 44 , 34 , 41 ] or specifying semantics at runtime [ 59 , 60 ] .
+However, perception is limited to object detection or designed for small room-centric environments where the planner can leverage clear hierarchy and natural bounds on the environment.
+
+We recently introduced the SPINE planning architecture, which serves as the base of our UGV planner [ 17 ] .
+In contrast to the above works, SPINE reasons over under-specified missions where the user provides high-level intent.
+Furthermore, the environment is only partially-known or unknown at runtime, so the system must actively acquire task-relevant information.
+Compared to our previous work, we extend SPINE to enable tasking the UAV , allowing it to generate a better prior for the UGV mission.
+
+2.4 Multi-robot communications
+
+Communication in air-ground teams can be broadly grouped into three groups: a) ensured network connectivity, b) rendezvous approaches, and c) opportunistic communication. Ensured network communication approaches focus on deploying a group of robots such that there is guaranteed communication between all network nodes [ 61 , 62 ] .
+Continuous communication approaches are key when a human operator is required in the loop or when robots need to
+report to a centralized base station continuously.
+The main disadvantage of this approach is that the experiment area is limited by the communication channel quality, and it can be severely limited in environments with non- line-of-sight (LOS) between robots.
+
+Rendezvous approaches rely on established guarantees for communication as robots physically meet to exchange information [ 63 , 64 ] .
+Alternatively, robots can form continuous communication networks and venture out to areas without communications [ 65 , 66 ] , with successful application in underground mapping at the SubT challenge.
+Still, these techniques limit
+mobility when the number of robots is reduced.
+
+In [ 10 , 9 ] , we introduced MOCHA, a fully opportunistic communication approach for air-ground teams.
+MOCHA is based on a gossip communication approach [ 67 ] , that enables large-scale exploration, as communication constraints do not limit robot operations.
+To avoid robots in isolated situations, the aerial robot acts as a data mule , finding ground robots and physically carrying data from them.
+We showed that MOCHA performs well in large-scale environments, in simulation and
+real-world experiments. This work leverages MOCHA for communication between the robots, and for the communication-aware planner of the UAV .
+
+2.5 Robot teaming with human in the loop
+
+Human-in-the-loop frameworks have become pivotal in improving robot teaming by integrating human oversight and domain-specific tasking into multi-robot systems.
+Measuring the efficacy of human-robot teaming has been studied extensively in [ 68 , 69 , 70 ] .
+Specifically, Novitzky et al. uses the game “capture the flag” in [ 68 ] and [ 71 ] to assess effective ways to task robot teammates.
+Robot teams with humans in-the-loop have been developed in [ 72 , 73 , 74 ] for various
+inspection tasks.
+All of these rely on predefining what is to be inspected before the system is running by hard-coding in [ 74 ] or predefining semantic labels as in [ 73 ] .
+All of these systems lack the ability for the human to re-task the robot team on the fly like our system can.
+Prior work has used different interfaces to interact with the robot team, including map interfaces [ 75 ] that allow for goto commands or search commands, and virtual reality [ 76 ] and gesture control [ 77 ] , which allow for advanced teleoperation of the robot.
+These interfaces require more input from the human-in-the-loop, which means the robot system is making fewer decisions.
+All of these interfaces fail to be as expressive as natural language for the human as our implementation of large language models in a human-robot team. In comparison, we present the first heterogeneous teaming system with a human in the loop capable of interacting through natural language.
+
+3 SYSTEM OVERVIEW
+
+Producer Name Message type Size UGV UGV_odometry Pose stamped 74 B UGV label_set String (JSON) 2B UAV aerial_graph String (JSON) 40.2 KB
+
+Table 1: Messages transmitted between robots using MOCHA, our opportunistic communications framework, after 10 minutes of an experiment.
+
+3.1 Mission specification
+
+This section describes the overall system architecture and mission specification using language as depicted in Fig. 1 .
+A human operator requests assistance with a particular task from one or more UGVs , which infers the semantics in the scene that need to be found.
+The UGVs also infers a list of labels that it will request the UAV to search for, in addition to traversable classes, like paved roads.
+
+The UAV then produces an initial graph with traversable regions and objects of interest, which is incrementally transmitted through MOCHA to the UGVs .
+New labels can be added on-demand by the UGV and sent to the UAV .
+The UAV also acts as a communication relay, carrying messages between the different robots and the operators if needed.
+
+Once a graph has been received, the UGVs plan a trajectory using the graph to
+objects of interest.
+If objects are found, they are reported to the operator.
+Our current system can run as many ground robots as required, but no coordination occurs between them.
+Additionally, we can pre-generate a partial environment graph using other data sources, such as satellite images.
+
+3.2 System architecture
+
+A system overview is presented in Fig. 2 .
+The different sub-components are described in Sec. 4 .
+We use a Global Navigation Satellite System (GNSS) to establish the positions of the different robots, as well as to annotate the coordinates of the nodes in the graph.
+
+3.3 Communications
+
+The list of messages transmitted by each robot over MOCHA is described in Tab. 1 , with a representative size for each compressed message 10 minutes after the start of the mission.
+
+We used Rajant [ 78 ] breadcrumb radios for our physical communication layer which MOCHA runs on top of.
+Robots use the Rajant DX-2 and Cardinal radios, whereas the base station runs a FE1 radio.
+The Rajant Breadcrumb API is used to obtain information regarding the link quality, such as the received signal strength indicator (RSSI) .
+This information is used to trigger a communication exchange between two robots.
+
+We also deployed dummy ME4 nodes to act as communication relays for LLM API calls for SPINE.
+These nodes do not participate actively in the opportunistic communication process.
+
+4 METHODOLOGY
+
+Figure 3: UAV Mapping system with dynamic input from the UGV. (1) A user defines a task which is passed to the SPINE planner. (2) The SPINE Planner assigns the UAV semantic classes to look for. (3) The UAV mapper parses the detections from Grounded SAM2 to produce a map. (4) The map is shared with the UGVs.
+
+Figure 4: An example of the generated semantic-metric map from the aerial robot is shown at different mapping iterations overlayed on Mapbox [ 79 ] satellite imagery.
+The estimated traversable graph is shown in blue and the semantics (in this example orange barrel ) is shown in green. Left : Mapping iteration=4, Center : Mapping iteration=12; Right : Mapping iteration=25.
+
+This section describes the components running onboard the UAV and UGV and how they complement each other.
+A key component of the approach is to use an open-set semantic-metric map that can be shared between the robots (compact communication) and efficiently supply updates in a structured format to the LLM-based decision maker.
+The core representation used by SPINE on the UGVs is a semantic-topological graph.
+As is common in the semantic mapping literature, each node is either a region or an object .
+Regions are traversable points in freespace [ 26 , 14 ] .
+An edge between two regions indicates that there is an obstacle-free path.
+Localized objects are represented as object nodes.
+An edge between an object and a region node indicates that the object can be observed from that region.
+Regions and objects may be enriched with additional semantic information ( e.g., this bridge is blocked by a vehicle), which provides additional context for planning.
+Both UGV and UAV mapping approaches use Grounding DINO [ 80 ] to detect objects of interest and incorporate information into the map to account
+for their particular visual and compute capabilities, which are described in the following sections.
+
+4.1 UAV Semantic Mapper
+
+This module is designed to build an object-centric semantic map that is grounded in a common frame of reference.
+It also maintains a region network of the environment that the UGVs can use for global planning.
+The components of the UAV semantic mapper are shown in Fig. 3 , and an example of such a map is shown in Fig. 4 .
+For the purpose of this work, we assume that the traversable component for the UGVs is the semantic class road . Still, our system can handle other classes if desired or required by the operation environment or mission.
+
+At the start of each mission, the set of labels is communicated to the aerial robot using MOCHA.
+The mapper then listens for images and their associated GNSS location and orientation from a custom GNSS/INS system.
+
+Localization. From our past work [ 8 , 81 ] , a major challenge in building useful aerial maps is the quality of orientation estimation and synchronization between the imagery and the odometry.
+In high wind scenarios where the UAV may maintain a significant pitch, localized points in the image projected onto the ground plane may be incorrect by several meters.
+We use GTSAM [ 82 ] to fuse GNSS coordinates and IMU data to get a high rate state estimate between GNSS readings.
+This allows us to get an accurate pose for each image.
+Further details on the implementation can be found in the Appendix. A.3
+
+Object Detection and Masking. We use Grounded SAM2 [ 83 ] for aerial object detections because of its zero-shot open-set performance, even on aerial data.
+The model uses Grounding DINO [ 80 ] for open-set object detection and SAM2 [ 84 ] for accurate segmentation of the objects.
+We use a base and large model, respectively, which combine to 12 GB of VRAM, with a latency of 3 to 5 seconds when running onboard the UAV , depending on how many objects are detected.
+
+Performance vs Compute Tradeoffs. Our system allows for abstract task specifications.
+This underspecified nature can result in several objects of interest being identified for mapping.
+We notice empirically that when smaller objects need to be detected that are harder to see from the air, the memory requirements of the detection model exceeds the available memory.
+In this case, we optionally use a smaller segmentation module SlimSAM [ 85 ] to ensure that the compute stays within budget.
+We note that this will result in noisy locations of objects being added to the graph but the UGV can use it’s additional compute capabilities to verify and correct the graph while still ingesting a coarse prior.
+The implications of this trade off is discussed in Sec. 4 . 4.2 and demonstrated in Sec. 6 .
+
+Graph Construction. Given the detections, the object coordinates are estimated by applying a distance transform on their associated pixel centroids.
+Each object is assigned the furthest point from the mask boundary as its coordinate.
+The pixel coordinates are then converted to UTM for a pre-specified origin with known camera intrinsics.
+To construct a region graph we use road as the semantic class. We first take the largest road mask in each image and only add a region node if the mask is more than 20% of the image.
+We also use the class building and car as negative objects, i.e. objects that we do not report. Without them the network often misclassifies buildings and cars as road, leading to untraversable edges in the graph.
+These filtering methods helps reduce the number of misclassifications of other objects in the scene as roads.
+When there is a large road segment we compute the same distance transform as before and assign the road point to the furthest point from the mask boundary.
+This point is then transformed to UTM coordinates and added to the region graph network by connecting it to the nearest region node. This pipeline is shown in Fig. 3 and results of the aerial semantic graph are shown in Fig. 4 .
+
+4.2 UGV Semantic Mapper
+
+The UGV mapper also maintains a local occupancy map, which the planner uses for free space exploration.
+The semantic graph constructed by the UAV provides an initial map estimate (see Sec. IV 4.1 ), and the UAV can iteratively provide map updates during the mission.
+
+Our UGV semantic mapping implementation is shown in Fig. 2 .
+The mapper takes RGB + Depth, LiDAR, and semantic configuration as inputs.
+LiDAR is used for odometry estimation (Faster-LIO [ 86 ] ) and local occupancy map construction (GroundGrid [ 87 ] ).
+The occupancy map is used to add and remove regions and edges from the map based on connectivity.
+RGB+D is used for object localization and captioning.
+Objects are detected using GroundingDino [ 80 ] ).
+Detections are then clustered and localized with a multiple-hypothesis tracker.
+A vision-language model (LLaVA [ 88 ] ) enriches the semantic information available to the planner (see Fig. 10 ).
+Outputs from these modules are used to add and remove nodes and enrich them with semantic information.
+A Semantic configuration is provided by the planner and is used to set the labels of the object detector and provide queries to the vision language model.
+The detection and tracking modules run at \sim 5\,\text{Hz} , the vision-language model runs at \sim 1\,\text{Hz} , and occupancy map construction runs well over 10\,\text{Hz} , all onboard.
+
+4.3 SPINE Planning
+
+The backbone planner used in this work is based on SPINE, first presented in [ 17 ] .
+This section summarizes some of the key ideas relevant to teaming.
+
+SPINE’s plan generator uses an LLM to infer a task sequence from a mission specification and semantic map.
+We configure a pre-trained LLM via a system prompt with three components: role description, the mapping interface, and a description of the behavior library.
+
+Mapping Interface. The mapping interface provides a textual representation of the semantic graph.
+The plan generator first receives a JSON representation of the graph. Then, at
+each planning iteration, all map updates are provided to the LLM in-context via the following API, which captures high-level graph manipulations: add_nodes , remove_nodes , add_edges , remove_edges , and update_nodes .
+The nodes are defined as a dictionary of attributes, which allows for providing nodes with rich semantic descriptions (example in Fig. 12 ).
+
+Plan Generation. SPINE composes plans via behaviors for navigation, active mapping, and user interaction.
+The LLM generates a receding horizon behavior sequence at each planning iteration, and this sequence is provided to the validation module.
+An “answer” behavior terminates a mission and notifies the user of results, and
+a “clarify” behavior is used to gain further instructions, if needed.
+
+We enforce chain-of-though reasoning by requiring the LLM to provide a justification for each action sequence, which reduces hallucinations or otherwise ungrounded behavior [ 89 ] .
+All inputs to the planner and action history are maintained in-context via the provided APIs.
+See Fig. 5 for an example action-control-perception loop.
+
+Figure 5: Example API use during mission. (1) user specifies a mission. (2) SPINE infers relevant semantic categories and configures perception labels. (3) SPINE then reasons about exploration targets. (4) Perception finds a car and notifies planner. (5) Planner informs user.
+
+Plan Validation. To create subtasks, the planner must correctly invoke its behavior library while reasoning over constraints such as traversability.
+Since LLMs are prone to hallucinate this information, we filter LLM-generated plans through a validation module,
+which ensures all plans are syntactically correct and physically realizable.
+If a given task is invalid, the validator forms state-specific feedback to the LLM.
+While this validation procedure provides
+valuable planning safeguards, the spatial constraints are contingent on perception.
+
+Online Map Correction. SPINE uses prior semantic graphs constructed from a UAV or satellite image.
+Such priors offer valuable contextual and traversability information, however they may contain spurious traversability edges.
+Identifying such errors online so that SPINE can replan is vital to a robust autonomy solution.
+SPINE thus uses feedback from the downstream controllers to infer spurious edges and remove them from the graph.
+If SPINE sends a navigation command across an edge that the controller cannot traverse, SPINE removes that edge from the graph.
+
+Figure 6: Example map correction. SPINE attempts to traverse an invalid edge (green line). Green points denote ground and red points denote obstacles. The controller cannot find a trajectory around the obstacle, and it times out after a pre-specified duration. The incorrect edge is removed from the graph, and that feedback is sent to SPINE.
+
+4.4 Mission Execution
+
+The UAV is tasked with an initial exploration mission over the area of interest.
+For our experiments, a pre-defined waypoint set is provided to avoid flying over unsafe regions in the area.
+However, waypoints can be generated with any coverage algorithm.
+
+After a timer t_{i} has elapsed, the UAV transitions into search and communication modes, looking for ground robots to transmit the graph.
+The last known pose is used as a heuristic for where to find the ground robot.
+Once the ground robot has been found and all the data has been transmitted, the UAV transitions again into exploration mode, covering all the waypoints in its mission.
+
+On the UGV , SPINE sends navigation subtasks to the low-level planner.
+These commands reference paths on the semantic graph (note that exploration commands first extend the semantic graph).
+Graph navigation paths are then sent to the ROS Move Base controller 2 2 2 http://wiki.ros.org/move_base , which plans trajectories realized by the Jackal controller.
+
+5 EXPERIMENTS
+
+Figure 7: Example images of the detection onboard the aerial robot for the Pennovation experiment, showing the quality of the zero-shot transfer to the aerial data. The red line indicate the flight path of the UAV overlayed on Mapbox [ 79 ] satellite imagery.
+
+We evaluate our system over three sets of experiments.
+We first evaluate the incremental graph construction of the Aerial Autonomy component of our system (Sec. V 5.1 ).
+We then evaluate the Ground Autonomy’s ability to realize language-specified missions in partially-known environments (Sec. 5 . 5.2 ).
+Finally, we demonstrate air-ground teaming in unknown environments given language-specified missions, in controlled settings (Sec 5 . 5.3 ).
+
+Platforms. We used the Falcon 4 [ 90 ] as our UAV platform.
+The UAV is controlled by a
+flight controller running PX4 firmware [ 91 ] .
+The primary sensors are a Blackfly S U3-32S4C-C RGB global-shutter camera, and a VectorNav VN-100-T inertial measurement unit (IMU) .
+The platform uses a U-blox ZED F9P GNSS sensor for localization.
+Finally, all the data is processed by an onboard Nvidia Jetson Orin NX.
+
+Our UGV platform consists of a Clearpath Jackal equipped with an AMD Ryzen 3600 CPU with 32 GB of RAM and an Nvidia RTX 4000 Ada SFF GPU.
+An Ouster OS1-64 LiDAR is used for obstacle avoidance, path planning, and odometry, while a ZED 2i stereo camera provides sensing for object detection.
+We also use a U-blox ZED-F9P GNSS to record the initial position of the UGV , which establishes a common reference frame with the overhead graph.
+Finally, we use a Vectornav VN-100 for global heading corrections.
+More details about the hardware platforms can be found in the Appendix.
+
+Environments. We perform Ground Autonomy experiments in two rural environments termed Bucker and Range 15, shown in Fig. 10 and Fig. 11 , respectively.
+Each environment stresses a unique component of the autonomy stack.
+Range 15 is large and semantically sparse.
+We use this environment to evaluate the autonomy’s reasoning over long-horizon missions, state estimation, and communications at scale.
+Buckner is smaller in scale but features richer semantics, such as bridges, gates, and parking lots, all within a few hundred meters.
+Buckner experiments evaluate the UGV autonomy’s ability to reason over richer or
+ambiguous specifications.
+
+We demonstrate the full air-ground system in Pennovation, an urban office park with fields, buildings, parking lots, and other structures.
+We also use data from these demonstrations to evaluate the aerial autonomy performance.
+All environments were uncontrolled.
+There were dynamic entities such as cars and people moving during experiments,
+and the environments contained many obstacles, both positive (fences, walls) and negative (ditches).
+
+5.1 Aerial Mapping
+
+Figure 8: Semantic detection results for Range 15, showing the zero-shot transfer capabilities of Grounded-SAM2 to a rural environment. The read line shows the flight path of the UAV overlayed on Mapbox [ 79 ] satellite imagery.
+
+In this section, we evaluate the components of the UAV mapping system.
+The important qualities of our aerial maps are: 1. Resolution, task relevance, semantic detections; 2. Small size for transmission between robots; 3. Accurate estimate of the traversable portions of the environment. We design experiments to measure the effectiveness of our proposed method for these qualities.
+We first test the quality of the object detector, and we then measure the size of the stored maps relative to the distance traveled.
+
+Object Detections. To evaluate our object detection module, we manually annotate the desired objects in 2 of our datasets and evaluate the false positive rate of the detector.
+The desired labels for this evaluation are task specific to these datasets and are not the same across both datasets.
+The results of this evaluation are shown in Tab. 2 .
+As shown, the object detector is able to perform remarkably well with zero-shot transfer to our data.
+The results are surprising considering the viewpoint of the UAV camera.
+The qualitative evaluation of the detected objects is shown in Fig. 7 & Fig. 8 .
+
+Specification Total Detections False Positives Precision Pennovation 1 708 127 82.1 % Pennovation 2 388 59 84.8 %
+
+Table 2: Performance of the aerial object detection module based on Grounded SAM2, zero-shot transfer.
+
+Incremental Graph Construction. To evaluate the quality of the constructed graph, we show an example of the incremental semantic-metric map generated by the robot overlaid onto a satellite image in Fig. 4 .
+An advantage of our method is the size of the map that is stored.
+We show in Fig. 9 that the maps are roughly linear in the distance traveled, and areas of size 20,000 m 2 can be stored in just kilobytes.
+
+Compared to our previous work [ 8 , 9 ] , the messages transmitted between robots are significantly smaller. For instance, the size of the uncompressed graph after flying 1000 m is approximately 12 to 17 KB, compared to 530 to 699 KB of the semantic map image generated by ASOOM.
+These results showcase the efficiency of the aerial semantic graph generated by the UAV compared to the previously used dense maps.
+
+Figure 9: Size of the uncompressed map as a function of the distance traveled by the UAV .
+
+Traversability Estimation. Finally, to measure the quality of the estimated road network, we manually annotate the true positives and false positives in the detected roads.
+The results of this analysis are shown in Table 3 . These results are encouraging: accurate road maps improve the performance of the ground autonomy stack.
+
+Specification Total Detections False Positives Precision Pennovation 1 82 9 89.0 % Pennovation 2 24 2 91.6 %
+
+Table 3: Performance of the traversable edge detection module.
+
+5.2 Ground Autonomy
+
+We evaluate the UGV autonomy platform independently of the UAV.
+We design experiments to assess the UGV autonomy’s ability to complete missions with differing specifications, environments, and priors.
+In contrast to the System Demonstration in Sec. V 5.3 and 6 , we generate the priors from registered satellite data.
+The priors contain traversability information and some relevant semantics.
+However, the priors are imperfect and contain irrelevant information and mistakes that the UGV must correct online.
+Our experiments evaluate the UGV’s ability to infer navigation, exploration, and information acquisition goals from natural language specifications, react to findings, and use findings to complete the user’s mission.
+
+Experimental Setup. We consider five mission specifications, as summarized in Table 4 , and evaluate each specification one to four times.
+We construct priors for each environment; however, the priors are not designed for a specific tasks.
+One of the primary purposes of the prior was to keep the robot away from negative obstacles, such as ditches, which could not be detected by the UGV .
+
+Specification Location Priors Desired outcome (S1) I heard of activity near the red houses. Go check Range 15 Red houses. No objects Identity and report several people near two red houses. (S2) Go inspect the black vehicle at the end of the driveway Range 15 Black vehicle is at the beginning of the driveway Planner identifies misspecification and correctly finds car. (S3) I got reports that the bridge was blocked. Go check. Buckner Bridge, no blockage Planner identities vehicle blocking the bridge (S4) Is there activity near the gate Buckner Gate, objects Planner identifies and reports a person (S5) Identify the parking lot 30 meters east of the bridge Buckner Bridge, but no parking lot Planner explore correct area and identifies parking lot
+
+Table 4: Mission specifications, locations and priors used to test the ground autonomy.
+
+Results and Discussion. We summarize the experimental results for each mission specification in Tab 5 .
+We report mission success, distance traveled, and the number of API calls.
+The number of API calls indicates how many subtask steps SPINE inferred during its mission.
+
+The UGV was successful in achieving S2 through S5.
+There were two unsuccessful missions during S1, each of which failed due to the large scale of the environment.
+In one outcome, a gust of leaves blew around the ground vehicle’s LiDAR, which caused unrecoverable odometry drift (see Fig. 15 ).
+In the second, the UGV lost communications and could not perform the LLM queries required for planning.
+
+Spec. Outcomes Dist. (m) API Calls Failure modes S1 1/3 1200 2 Odom., Comm. S2 2/2 231 4 N/A S3 4/4 265 2 N/A S4 1/1 132 2 N/A S5 1/1 450 3 N/A
+
+Table 5: UGV autonomy outcomes. SPINE completed all missions except for two during the first specification, which failed due to odometry drift and communication loss.
+
+We highlight two emblematic missions.
+Fig. 10 shows the UGV trajectory from a mission with the specification: “I heard the bridge was blocked. Can you check?”.
+SPINE infers that the relevant semantics are bridge, car, truck, bicycle, pedestrian, construction cone, debris, and barrier.
+The planner then navigates to the bridge by constructing the following plan goto(road_5), map_region(bridge_1) .
+Upon mapping the bridge, SPINE discovers several obstacles, including a person, car, and construction barrier.
+SPINE uses the VLM to get a more detailed description, as shown in Fig. 12 , and reasons over this information to respond “The path across the bridge is likely blocked due to the presence of a construction cone and a person. There is also a silver car and a woman on the bridge, which may indicate a temporary blockage.”
+
+Figure 10: Example mission from S3. “I got reports that the bridge was blocked. Go check.” The UGV starts its mission at the bottom left of the trajectory (1). The UGV then infers an mapping target (bridge). After navigation and mapping, it identifies several obstacles and reports its findings to the user (2).
+
+Figure 11: Example mission from S1. “I heard of activity near the red houses. Go check.” At the start (1), the UGV identifies exploration targets (red houses, bottom) and navigates there from its start location (2). The UGV successfully identifies several people. The ground vehicle communicates its findings in realtime via text. It then returns to its starting location to offload mission data.
+
+Figure 12: In the above example, the ground vehicle must learn if the bridge is blocked. The ground vehicle (Specification 3). The ground vehicle’s planner, SPINE, uses a Vision Language Model running onboard to obtain detailed semantic information for the user.
+
+Fig. 11 overviews a mission in which the UGV was provided the task: “I heard of suspicious activity near the red houses. Go check.”
+The UGV had red houses on its prior map, so it infers a plan to map those.
+Along the way, it observes cars and people. Because those objects are not near the red houses, the UGV records those in its map but does not consider them as relevant to the task.
+Finally, the UGV reaches the red houses, discovers people, and reports them to the user.
+The user then asks the UGV to return to the starting location to offload data. Overall the mission requires the UGV to traverse 1200 meters, which test all layers of the autonomy stack including the odometry and communication network. SPINE uses active perception to resolve errors in the mission specification. Examples about active perception are presented in the Appendix.
+
+5.3 Air-Ground Teaming Evaluation
+
+We evaluate the performance of our air-ground teaming system as compared to single-UGV variants against language-specified missions in unknown environments.
+The first baseline (“UGV w/ GT”) receives a full map constructed from satellite imagery, which estimates upper-bound performance of the mission given our UGV autonomy stack.
+The second baseline (“UGV”) receives no prior map, and this baseline must explore to accomplish the mission.
+We consider a triaging mission where the system must respond to a chemical spill by inferring relevant semantic ( i.e., chemical barrels, people), map the relevant area, and report its findings.
+The system is given the specification “triage the chemical spill 100 meters X,” where X is a location prior. Note the system is not explicitly provided the relevant semantics ( i.e., barrels); rather, it must infer. We repeat this experiment three times for each baseline and six times for our system, with location priors to the north and northeast.
+
+We report results in Table 6 , as measured by success rate, distance traveled by the UGV, and the percentage of time spent in autonomous mode.
+Unsurprisingly, the UGV obtains a 100% success rate when given a full prior map of the environments.
+Our system achieves an 83.3% success rate while spending a compatible amount of time in autonomous mode.
+Our system also travels a similar distance, indicating that the prior map provided by the UAV offers efficient paths.
+Without a prior map, the UGV is unable to find the goal.
+We find that the UGV increasingly struggles with long-scale exploration, as indicated in Fig. 13 .
+
+Method Success (%) Dist. (m) Autonomous (%) UGV 0 54.9 94.6 UAV-UGV 83.3 104.9 99.3 UGV w/ GT 100 100.7 99.7
+
+Table 6: Experiments with air-ground teaming compared to UGV-only methods. GT corresponds to a pre-computed map from satellite imagery.
+
+Figure 13: UGV-only mission success as goal distance increases. Without priors, the UGV must build a map entirely from exploration, which it struggles to do as the goal distance increases.
+
+6 System Demonstration
+
+Figure 14: Size of graph as a function of the mission time for the ground vehicles. Ground vehicles receive graph updates from onboard mapping and the aerial vehicle, thus the map grows substantially over the mission.
+
+Through the previous sections, we demonstrated the use of the system in relatively controlled settings.
+In this section, we show qualitative demonstrations of the system in underspecified missions that require reasoning and the sub-tasks have to be inferred by the system.
+As mentioned in Sec. 4 . 4.1 , a smaller model is used to generate the object masks to keep the compute feasible.
+We demonstrate the full system through two experiments in the Pennovation environment shown in Fig. 16 .
+The mission concept follows from the one described in Fig. 1 .
+Large-scale demonstrations stress the autonomy stack of the ground robots, the opportunistic communication, and the behavior of the air-ground team.
+Note that in addition to the components evaluated previously, we stress the human-in-the-loop aspect of our system.
+In particular, the operator is constantly receiving updates and retasking the robot.
+
+We report the total distance traveled, mission duration, human interactions, API calls, prior edges removed, and percent of the time the UGV was in autonomous mode.
+As the system experiments feature human in the loop tasking, we report the number of user interactions.
+We also report the number of API calls, the number of edges removed by the planner, and percent of time the UGV was in autonomous mode.
+All results are reported in Table 7 .
+
+System Demonstration 1: Mapping and Inspection The first mission was specified by the query “I heard of construction around the eastern roads. Can you check?.”
+The planner inferred that the following classes were relevant: crane, bulldozer, cement mixer, construction sign, scaffolding, excavator, hard hat, construction worker, truck, and barrier.
+The UAV incrementally built a semantic graph and provided it to the UGV .
+Throughout the mission, the UGV reported relevant findings to the human operator, who would then retask the UGV based on those findings.
+Overall, the UGV traveled 756 meters and received 21 updates from the operator.
+The UGV spent nearly 90% of its time in autonomous mode.
+The manual takeovers came primarily from dynamic obstacles, such as buses or trucks, or small obstacles that the UGV obstacle detection could not identify, such as puddles or potholes.
+The ratio of API calls to user interactions is lower than in the UGV-only experiments (See Table 5 ).
+This is because, in the UGV -only experiments, the ground robot inferred all decisions autonomously, whereas in this experiment the UGV would reach back to the human operator.
+Throughout the mission, the UGV provides this information via detected objects and scene captions associated with the graph.
+Importantly, the UGV also provides negative information ( e.g., “this is a parking lot with no construction activity”).
+
+System Demonstration 2: Triaging The second mission was specified by the query “you are working with a high-altitude UAV to search for people.”
+During mission execution, the user provided additional details.
+For example, the user first instructed the UGV to look 30 south and 50 meters east, in order to complement the UAV’s flight path.
+SPINE infers the relevant classes are person, tree, car, bicycle, bench, backpack, streetlight, trash can, and umbrella.
+Following a similar mission concept, the UAV is provided with the same list of classes to generate and provide a semantic map.
+SPINE also provides an interpretable explanation for the chosen classes: For instance, ‘Bench’, ‘backpack’, and ‘trash can’ indicate places where people might be found or have left their belongings. ‘Buildings’ and ‘streetlights’ provide “structural context to the environment”.
+The UGV works with the user to explore the environment.
+Throughout the mission, the UGV provides natural language description of the previously unexplored area, which provides situational awareness to the user and aids in planning.
+Snapshots of the experiment are shown in Fig. 16 .
+Overall, the UGV correctly identified five people.
+The detection system made one false positive, and one person was in the UGVs field of view, but the tracker failed to register that person.
+
+Figure 15: Example of odometry failure. A gust of leaves blew around the ground vehicles LiDAR. The spurious returns caused unrecoverable odometry drift.
+
+Figure 16: Snapshots of the second system demonstration. The air ground team is tasked with finding people in the Pennovation environment. The ground vehicle provides updates in natural language about mission findings (people) and broader context (scene description, etc). Because the environment is unknown at runtime, such context provides valuable situational awareness to the user.
+
+Specification UGV Distance (m) Time (s) User Interactions API calls Removed Edges (%) Autonomous (S6) I heard of construction around the eastern roads. Can you check? 765 2097 21 41 8 90 (S7) You are working with a high-altitude UAV to search for people. 695 2390 19 37 15 93
+
+Table 7: System demonstration results over two different specifications. Both missions require the air ground system to acquire information in the Pennovation environment, thus the resulting metrics are similar.
+
+7 DISCUSSION, CONCLUSION, AND FUTURE WORK
+
+We conclude the paper by discussing our results, summarizing our key contributions, and outlining promising directions for future work.
+
+7.1 Discussion
+
+UGV traversability estimation was a primary system bottleneck.
+The UGV struggled to identify negative and small positive obstacles, limiting the area that the UGV could safely explore.
+For example, Fig. 17 shows a portion from the second system demonstration where the UGV failed to identify a curb.
+While the semantic graph from the UAV provided valuable traversability information, it contained false positives such as buildings marked as roads.
+The UGV often identified these errors online and corrected its path.
+However, the safety operator had to take over when false positives brought the UGV through curbs or other challenging obstacles.
+This is particularly apparent in Sec. 6 where the specificity of the task is lower and a smaller model is used to generate the object masks leading to harder trajectories for the UGV to follow leading to less time spent in autonomous mode.
+The system used GNSS to register maps between robots, but the UGV used LiDAR odometry only for state estimation.
+While LiDAR odometry is typically a robust state estimation solution, it suffers from drift in highly dynamic scenes, as shown in Fig. 15 .
+Finally, we observed that the LLM-enabled planner was unable perform robust exploration, as evidenced by our UGV-only exploration experiments (see Fig 13 ), which made the UGV dependent on a strong prior from the UAV.
+
+Figure 17: Example reason for manual takeover. Curbs (circled) are not detected by traversability estimation, thus UGV tries to drive over them.
+
+Figure 18: Example misclassifications made by open-vocabulary object detection. Depending on the mission specification, misclassifications can be benign (falsely detected street sign, top) or detrimental to the mission (falsely detected person, bottom).
+
+7.2 Conclusion
+
+In summary, we present an air-ground teaming system for natural-language missions in unknown environments.
+The system infers relevant semantics given a specification.
+An aerial vehicle then incrementally builds a mission-relevant semantic map, which is relayed to a ground vehicle.
+The ground vehicle then uses an LLM-enabled planner to infer and realize subtasks that realize the mission, and the planner leverages online semantic mapping to augment and correct the semantic map received from the aerial vehicle.
+During the mission, the aerial vehicle intermittently provides a map update to the ground vehicle via an opportunistic communication network.
+We evaluate our system over seven different specifications in urban and rural environments in up to kilometer-scale navigation missions.
+
+7.3 Future Work & Open Challenges
+
+We see several interesting directions for future work.
+This work uses LLMs to translate and act upon instructions in natural language and leverages a structured map format for in-context updates.
+While this empirically works, we lose information in the construction of the maps and are explicitly reliant on an uplink to communicate with the language model API.
+
+Onboard Language Models. In this work, we use the OpenAI GPT 4o model, which makes us reliant on a robust communication infrastructure.
+In our ideal system, we would be able to decompose the main task from the user into subtasks that onboard LLMs can handle.
+Keeping the interface between the robots to be natural language allows us to maintain the sparsity of the communication
+between the robots and interpretable by humans in the loop.
+
+Traversability Estimation. While segmenting aerial images appears to have good zero-shot performance, imperfections in the detections can lead to catastrophic failure in a UGV with a naive local planner.
+Failure cases such as minor localization errors, inability to perceive thin objects like fences, and the change in depth between roads and curbs may result in collision for a naive UGV planner.
+Additionally, while a coarse traversability estimation can be computed by segmenting roads, paths, and grass, these are not always meaningful for all robot modalities.
+For example, smaller robots will have difficulty traversing potholes, speed bumps, or curbs, which may be included in a road segmentation.
+Incorporating a robot-based traversability would be a valuable addition to this work. For instance,
+in addition to the pre-defined road label, we can task the aerial robot to find semantic classes that align with the robot’s experience or claimed capability to paths better suited to the robot.
+
+Finally, in future work we plan to use dense depth images to find smaller objects like tree roots or potholes that robots can avoid based on their capabilities.
+In this framework, we can also imagine re-tasking of UAVs to regions in the environment that are semantically meaningful.
+Our pipeline is able to accommodate the geometric clustering of semantically meaningful objects into regions.
+This in turn could be used to interactively ask the aerial robot to survey desired locations in the environment with tasks such as “Map all the cars in parklot_01 ".
+
+ACKNOWLEDGMENTS
+
+We would like to acknowledge
+Katie Mao, Frank Gonzalez, Dexter Ong, and Kashish Garg for their help during the field experiments for this work. We would like to acknowledge Dr. Michael Novitzky and Tyler Errico for their help and support during field experiments at USMA West Point.
+
+APPENDIX
+
+A.1 Platforms
+
+While our methodology can support other platforms, we use a custom built quadcopter and a ClearPath Jackal for this work.
+Figs. A.1 and A.2 shows the platforms used during our experiments.
+Both platforms are suited with compute capabilities to generate the semantic mapper onboard.
+The choice of compute onboard these platforms is the result of several iterations of field experiments and are targeted towards the maximum available CPU & GPU compute for the power budgets for the respective platforms.
+The power budget allowed for the Jackal is 200W and the UAV is allowed a power budget of 100W.
+The UGV and UAV both have a battery life of approximately 30 minutes.
+Both platforms were fitted with Rajant mesh radios. We also used dummy nodes (Fig. A.4 ) as communication relays for SPINE, as described in Sec. III. 3.3 .
+
+Figure A.1: Falcon 4 platform configured for high-altitude semantic mapping missions.
+
+Figure A.2: UGV platform used for ground experiments.
+
+A.2 Air router & State machine
+
+We relied on air_router [ 18 ] to guide the UAV during the experiments. This high-level state machine, illustrated in Fig. A.3 , transitions the UAV between an exploration and a communication mission. It also looks for ground robots (based on the last known position or last known goal) to deliver messages if communication has not occurred recently.
+
+Figure A.3: UAV mission executed during the air-ground experiments.
+Figure from [ 10 ] .
+
+Figure A.4: Communication nodes used for field experiments. Left : FE1 base station node. Right : dummy ME4 node used for LLM API calls.
+
+A.3 UAV Localization
+
+In order to localize objects within images accurately we need an extremely accurate pose estimate for when each image was taken.
+To this end, we use GTSAM [ 82 ] to fuse GPS position estimates with IMU readings.
+For our IMU we use a Vectornav V100T which runs its own Kalman Filter to fuse magnetometer with gyroscope and accelerometer readings. This gives us north aligned orientation data from the IMU at 400 hz.
+We get 5 hz global position readings from the GPS which we model as unary pose factors [ 82 ] and use the preintegrated IMU measurements [ 92 ] to constrain the pose graph.
+As the UAV can cover several kilometers we use the iSAM2 [ 93 ] optimizer to maintain a reasonable latency over large distances.
+We run the optimizer at each GPS measurement.
+We ensure that we do not include erroneous GPS measurements by ensuring that they lie within 2 \sigma of the estimated pose and covariance.
+We also predict the pose at 100 hz by integrating the IMU measurements from the last optimized pose to the current time.
+We note that while we use this particular set of sensors in this work, the framework could be extended to include other sensors such as barometers (for height) and raw magnetometer readings directly.
+This allows us to get sub one-tenth of a second pose estimates for each image.
+
+A.4 Active Perception
+
+SPINE uses active perception to resolve errors in the mission specification. Fig. A.5 shows a mission where the UGV is provided the task: “There is a black vehicle at the end of the driveway. Go inspect it.” The UGV goes to the end of the driveway but does not find a vehicle.
+During navigation, it observes the vehicle at the beginning of the driveway.
+So, it doubles back to observe those, and queries perception to find the color of the vehicle.
+
+Figure A.5: Example of SPINE using active perception to correct mission misspecification. User tasks ground vehicle with inspecting a black vehicle at the end of the driveway (1). However, there is no ground vehicle at the end of the driveway (2). The ground vehicle identifies several cars and trucks at the start of driveway, and inspects those. The ground vehicle forms a mission-relevant perception query “is this vehicle black” in order to resolve the mission.
+
+Figure A.6: UGV trajectory from the first system demonstration. Using the UAV-generated graph, the UAV travels over 700 meters while finding objects and describing regions of the enviroment.
+
+A.5 Large-scale demonstrations
+
+We plot the UAV path from the first system demonstration, as reported in Sec 6 , in Fig. A.6 .
+Please note that the trajectory is overlayed on a Google Earth image, so the vehicles displayed were not present in the actual experiment.

@@ -1,0 +1,1233 @@
+FlyCo: Foundation Model-Empowered Drones for Autonomous 3D Structure Scanning in Open-World Environments
+
+Autonomous 3D scanning of open-world target structures via drones remains challenging despite broad applications.
+Existing paradigms rely on restrictive assumptions or high-effort human priors, limiting practicality, efficiency, and adaptability.
+Recent foundation models (FMs) offer great potential to bridge this gap.
+Thus, this paper investigates a critical research problem: What system architecture can effectively integrate FM knowledge for open-world target structure scanning? We answer it with F ly C o, a principled FM-empowered perception-prediction-planning loop enabling fully autonomous, prompt-driven 3D target scanning in diverse unknown open-world environments. F ly C o directly translates low-effort human prompts (text, visual annotations) into precise adaptive scanning flights via three coordinated stages: (1) perception fuses streaming sensor data with vision-language FMs for robust target structure grounding and tracking; (2) prediction distills FM knowledge and combines multi-modal cues to infer the partially observed target’s complete geometry; (3) planning leverages predictive foresight to generate efficient and safe paths with comprehensive target coverage.
+Building on this, we further design key components to boost open-world target grounding efficiency and robustness, enhance prediction quality in terms of shape accuracy, zero-shot generalization, and temporal stability, and balance long-horizon flight efficiency with real-time computability and online collision avoidance.
+Extensive challenging real-world and simulation experiments show F ly C o delivers precise scene understanding, high efficiency, and real-time safety, outperforming existing paradigms with lower human effort and verifying the proposed architecture’s practicality.
+Comprehensive ablations validate each component’s contribution. F ly C o also serves as a flexible, extensible blueprint, readily leveraging future FMs and robotics advances.
+Code and development environments will be released.
+
+
+
+1 Introduction
+
+Autonomous, accurate 3D scanning of human-intended open-world structures with aerial robots is a key enabler for infrastructure inspection ( BeyondVision 2023 ), disaster response ( Esri 2023 ), and heritage documentation ( Mapalytics 2024 ).
+However, achieving efficient scanning in diverse, unknown open-world environments remains challenging: the drone must precisely localize the user-specified structure amid clutter and execute compact, collision-free coverage without wasting time on irrelevant regions.
+
+Figure 1: Teaser.
+(A) Overview of the proposed FM-empowered aerial system to autonomously scan user-specified structures.
+It seamlessly integrates physical world understanding and knowledge built into FMs with advanced autonomous flight capabilities, translating low-effort human prompts (text descriptions, visual annotations) into precise drone actions for efficient target scanning in unknown open-world environments.
+This is achieved via a coordinated perception-prediction-planning loop, which operates entirely without human intervention or prior environmental knowledge.
+(B-C) Existing paradigms typically rely on effortful human priors and involvement, and tend to trigger re-flights for incomplete scans, both of which limit practicality, efficiency, and adaptability in open-world scenarios.
+
+Human pilots handle this reliably.
+Given an instruction such as “ scan the castle in the valley ,” they can quickly identify the intended structure, infer its full layout from partial views for guiding motion, and coordinate sensing and motion to efficiently acquire dense coverage while avoiding obstacles in real-time.
+This stems from rich world knowledge about 3D spaces and the seamless integration with flight skills.
+In contrast, existing drones lack such generalizable capabilities and still rely heavily on expert operation or high-effort human priors to balance efficiency, information completeness, and safety across new scanning tasks.
+
+Early solutions ( DJI 2024 ; Skydio 2025 ) rely on pre-defined flight patterns ( e.g. , lawnmower), performing limited adaptability to complex geometries and requiring user-configured parameters.
+Subsequent works ( Roberts et al. 2017 ; Hepp et al. 2018 ; Smith et al. 2018 ) improve coverage quality via two-stage pipelines, combining coarse scans with offline fine-grained planning over human-processed geometry (Fig. 1 B).
+Other approaches ( Jing et al. 2016 ; Zhou et al. 2020 ) replace coarse scans with external priors like satellite imagery or pre-existing 3D models.
+While better handling complex structures, they still depend on human setup or prior data and fail to handle unexpected obstacles.
+Exploration-based methods ( Song and Jo 2017 ; Bircher et al. 2018 ; Luo et al. 2024 ) further reduce human involvement by treating target scanning as online exploration (Fig. 1 C), but typically operate within user-specified 3D bounding boxes, making performance highly sensitive to box accuracy (overly large boxes waste effort on irrelevant regions, whereas tight boxes may miss target parts).
+Moreover, without global scene context, these systems react locally to current observations, generating inefficient paths.
+In practice, both paradigms frequently necessitate post-flight human evaluations and repeated re-flights, undermining operational efficiency and flexibility.
+Recently, several works ( Feng et al. 2023 ; Guédon et al. 2023 ; Chen et al. 2024 ) incorporate reasoning about unobserved target geometry to provide global context.
+Despite their promise, these methods are evaluated primarily in small-scale simulations or simplified environments with no target-irrelevant obstacles and restricted structure diversity, leaving their zero-shot generalization to real-world scenes and practical applicability unclear.
+Collectively, existing paradigms fall short of the foundational understanding and world knowledge of human pilots, relying on manual setup, strong human priors, or idealized assumptions that hinder low-effort, efficient operations that are robust and support strong generalization in the open world.
+
+The core bottleneck of existing aerial systems— lack of scene understanding and world knowledge —is precisely where recent foundation models (FMs) offer the potential to reduce reliance on high-effort human priors.
+Their success in vision-language alignment and visual generation suggests a compelling avenue towards human-like spatial understanding and imagination for drones.
+Although FMs have already advanced ground-robot navigation and manipulation, naively mirroring them fails to address the unique challenges of open-world 3D aerial scanning.
+
+First , most prior works integrate FMs into robotic systems via end-to-end (e2e) learning, requiring massive expert demonstrations.
+For open-world aerial scanning, where the drone must simultaneously balance coverage, efficiency, and safety across highly diverse scenarios, collecting massive expert flight data is impractical.
+Additionally, FM’s high inference latency conflicts with the real-time response needed for smooth, efficient flight. Second , FMs are primarily designed for language and 2D vision.
+Distilling their knowledge into 3D spatial domains to enable drones to recognize complex targets amid clutter and predict their unseen parts remains underexplored.
+Concretely, target recognition must handle streaming sensor data and stay robust to viewpoint shifts in long-sequence flights, while off-the-shelf FMs are memory-intensive and lack stability.
+For reliable planning guidance, current prediction methods neither generalize well to novel structures in physical-scale nor infer plausible shapes from partial observations while strictly aligning with them; outputs unfaithful to observed parts risk geometric hallucinations, mismatches, and reduced scan efficiency ( Yan et al. 2025 ; Sec. Partial-surface regularization. ).
+These gaps go far beyond trivially fine-tuning FMs using 3D data and call for careful designs. Third , FM-driven robot motion strategies typically rely on short-horizon reasoning, which misaligns with 3D scanning’s demand for efficient global coverage planning.
+They also neglect temporal consistency with historical paths, risking trajectory inconsistencies and reduced efficiency.
+Moreover, global planning incurs heavy computational overhead, which leads to delayed planning updates that direct drones to target outdated surfaces while impairing real-time obstacle response.
+Together, these gaps raise an unanswered system-level question: What architecture can effectively integrate foundation-model knowledge with flight skills to truly achieve performant, practical aerial target structure scanning across diverse open-world environments?
+
+In this work, we address this question with F ly C o (Fig. 1 A and Extension 1), a holistic FM-powered aerial system enabling precise, efficient, and safe scanning of diverse complex user-specified 3D structures in unknown open-world environments.
+Driven solely by abstract human prompts ( e.g. , textual descriptions, visual annotations), it eliminates the need for effortful priors or interventions ( e.g. , 3D bounding boxes, human involvement) commonly required in existing paradigms.
+To tackle the first challenge, we adopt a modular architecture inspired by expert pilots’ cognitive processes for scanning tasks, comprising prompt-grounded scene understanding, spatial structural prediction, and efficient, safe flight planning.
+Our design leverages FMs’ strengths in perception and prediction while assigning long-horizon planning and real-time response, areas where FMs are deficient, to optimization-based methods.
+This avoids the expert-data hunger of the e2e fashion while retaining the scene knowledge of FMs.
+Asynchronous operation of the three modules eliminates mutual blocking in e2e frameworks.
+Notably, the planning module harvests rich information from low-frequency FM inference outputs to conduct continual planning, reconciling the latency mismatch between slow FM reasoning and real-time flight needs.
+The predictive capability enables global planning, overcoming the local myopia of existing methods. F ly C o’s flexible perception-prediction-planning loop and modular interfaces further enable future performance upgrades via direct module replacement.
+
+For the second challenge, we carefully design two modules: prompt-grounded scene perception and multi-modal surface prediction.
+Leveraging the generalizable understanding of FMs, perception aligns user prompts with streaming sensor data to segment target structure in 3D clutter, while our FM-tailored streaming-efficient adaptation and cross-modal refinement boost efficiency and ensure robustness across viewpoints and time.
+For prediction, we introduce a multi-modal network that completes the target’s 3D surface from partial views.
+This design fuses complementary advantages from multiple sources, where partial geometric cues anchor outputs to physical measurements, while visual and textual cues that integrate distilled FM knowledge ensure generalization, enabling reliable inference of unseen parts.
+Architecturally, we adhere to a minimal-inductive-bias principle with a post-fusion scheme, allowing the model to learn rich structural priors from data while effectively absorbing FM knowledge.
+Beyond the network, we adopt complementary designs to address key challenges.
+Specifically, a FM-based automatic data generation tool synthesizes aligned multi-modal data for large-scale annotation-free learning, boosting generalization across diverse structures and scales.
+At inference, an adaptive densification strategy mitigates the inflexibility of fixed network outputs for structures with different scales, ensuring appropriate granularity for varying-sized targets without added model complexity.
+Additionally, a lightweight partial-surface regularization during training explicitly encourages consistency with measured geometry, avoiding discrepancies between predicted and observed surfaces and enhancing temporal stability.
+Together, these designs yield globally plausible and locally faithful predicted structures, converting uncertain unobserved regions into a clear global structural context to enable proactive goal-directed planning.
+
+Figure 2: In-the-wild demonstrations across four scenarios.
+The user-specified targets include: (A) an arch bridge linking buildings, (B) a large concert hall, (C) a castle gate, and (D) a red-brick building.
+
+Building on the prediction capability, we propose a prediction-aware hierarchical planner, reducing redundant flight caused by short-horizon myopia.
+To ensure smooth path adjustments across historical and current paths, we present the injection of consistency awareness into global planning, improving long-term planning coherence and efficiency.
+Moreover, aiming at the high computational overhead of NP-hard coverage planning in physical-scale scenarios, we adopt two strategies: we employ inlier-driven intersection parity checking and gravitational-like viewpoint pruning to efficiently generate high-quality coverage viewpoints that keep pace with the latest prediction; we also adopt a two-level decomposition strategy to split the original problem into smaller solvable sub-problems, achieving the real-time solution of high-quality coverage paths.
+Finally, at the local level, guided by the global coverage path, we implement viewpoint-constrained trajectory optimization for high-frequency local planning, adapting to real-time safety requirements in the presence of emerging obstacles while preserving structural information completeness.
+
+Overall, F ly C o leverages FMs to understand complex structures from simple text/visual prompts and seamlessly integrate scene knowledge with flight skills, enabling low-effort, efficient, reliable 3D scanning.
+We evaluate the full F ly C o system on a customized aerial platform via diverse challenging field experiments at unmapped wild sites, covering key challenges: precise scene understanding, robust prediction in large-scale scenes, and efficient safe scanning in cluttered environments (Fig. 2 ).
+Field trials confirm F ly C o reliably scans user-specified structures from simple prompts with efficient, robust performance.
+Benchmarked against state-of-the-art (SOTA) methods from existing paradigms in complex 3D simulated scenarios, F ly C o consistently outperforms competitors in terms of lighter human input, 1.25 - 3\times reduced flight time, 4.3 - 56.2\% higher target coverage, and 11.6 - 50.1\% higher success rate.
+We complement these results with an in-depth analysis of F ly C o’s advantages and practical viability relative to existing approaches.
+Ablation studies further validate the importance of each module, confirming our design choices.
+In summary, our main contributions are as follows:
+
+A principled and flexible FM-empowered aerial system architecture for open-world 3D targeted structure scanning. F ly C o seamlessly integrates generalizable FMs with advanced flight skills via a closed-loop perception-prediction-planning framework, enabling prompt-driven efficient scanning of complex structures in diverse, unknown open-world environments.
+
+A prompt-grounded perception module enabling practical FM-based 3D scene understanding for aerial scanning, in which FM-tailored streaming-efficient adaptation and cross-modal refinement boost efficiency and robustness across viewpoints and time.
+
+A novel multi-modal surface prediction pipeline harnessing FM world knowledge, fusing partial geometric and visual/textual cues for metrically grounded shape completion.
+It features four key designs: a minimal-bias, post-fusion network powered by FMs, annotation-free data synthesis for large-scale learning, adaptive densification, and partial-surface regularization, achieving globally plausible, locally faithful results with strong zero-shot generalization and temporal stability.
+
+A prediction-aware hierarchical planner for efficient, safe long-horizon planning.
+It incorporates consistency awareness injection, efficient viewpoint generation and two-level decomposition for real-time and consistent coverage planning; the local layer adopts viewpoint-constrained optimization to ensure safety amid unseen obstacles while preserving information completeness.
+
+Extensive validation of F ly C o via real-world in-the-wild flights and large-scale simulation benchmarks against SOTA methods, complemented by analyses and ablations, collectively demonstrating the system’s superior performance and architectural validity.
+Source code and development environments will be publicly available.
+
+2 Related Work
+
+2.1 Classic 3D Aerial Scanning
+
+Early work on aerial 3D scanning in practice and in the research literature largely followed pre-defined flight patterns, typically implemented as commercial tools for mapping and inspection ( DJI 2024 ; DJI 2025b ; Litchi 2025 ; PIX4D 2024 ; Skydio 2025 ).
+These systems generate simple, parameterized trajectories such as lawnmower, orbit, and grid patterns once the user has drawn a polygon or box around the area to be scanned and chosen parameters like altitude, overlap, and speed.
+Because the paths are planned without explicit consideration of the underlying 3D geometry or real-time perception feedback, they cannot adapt to cluttered surroundings and often require manual adjustment by a skilled operator.
+In addition, the high-altitude, geometry-agnostic nature of these trajectories typically limits the level of structural detail and leads to incomplete coverage, especially for near-ground or recessed features that fall outside the effective viewing geometry.
+
+To better account for structural complexity, subsequent methods further began to integrate target geometry into the planning process via two-stage pipelines ( Roberts et al. 2017 ; Hepp et al. 2018 ; Smith et al. 2018 ; Peng and Isler 2019 ; Feng et al. 2024 ).
+Representative two-stage strategies first execute a coarse data-collection flight, then manually reconstruct the 3D model of the target from the captured data, and perform offline optimization to generate a dense inspection path, for example via submodular viewpoint selection for close-range coverage ( Roberts et al. 2017 ).
+Building on this idea, Hepp et al. 2018 and Smith et al. 2018 decoupled viewpoint generation from trajectory optimization and explicitly optimized sensor orientations to increase visibility, while Peng and Isler 2019 introduced adaptive plane-wise grid sampling to reduce the viewpoint search from 3D to 2D.
+Methods like ( Feng et al. 2024 ) further improved trajectory efficiency through topological guidance, while others ( Jing et al. 2016 ; Zhou et al. 2020 ; Zhang et al. 2021 ) leveraged prior information such as satellite imagery, CAD/BIM models, or pre-existing reconstructions to replace the initial data-collection stage for reducing flight time.
+Although these techniques improve scanning efficiency and achieve high-quality coverage, they remain tightly coupled to heavy human effort and scene-specific prior knowledge, and are typically executed in an offline fashion.
+As a result, they offer limited real-time adaptability to unexpected obstacles and do not satisfy the level of autonomy required for open-world 3D target structure scanning.
+
+2.2 Exploration-based 3D Aerial Scanning
+
+To reduce manual setup and improve adaptability in unknown environments, a class of online autonomous exploration strategies ( Song et al. 2021 ; Bircher et al. 2018 ; Song et al. 2021 ; Luo et al. 2024 ) emerged.
+They typically required users to specify a task range delineated by a 3D bounding box, under the premise that this volume fully encloses the target structure.
+Subsequently, drones then survey all unknown space within this volume using frontier-based ( Yamauchi 1997 ) or next-best-view (NBV) ( Connolly 1985 ) algorithms. Song and Jo 2017 alternated between NBV selection and local scanning path planning, incrementally refining 3D coverage within the given bounded workspace. Bircher et al. 2018 used a receding-horizon NBV strategy that chooses viewpoints in a Rapidly-exploring Random Tree (RRT) over free space and selects paths maximizing surface information gain for 3D exploration and inspection.
+On the other hand, Song et al. 2021 extracted frontiers between current known and unknown space, then sampled viewpoints to observe these frontiers, and planned minimum-distance paths that visit the viewpoints sequentially.
+More recently, Star-Searcher ( Luo et al. 2024 ) further improved efficiency by introducing a LiDAR-camera cooperation workflow.
+It adopted a frontier-based strategy to autonomously survey all occupied space within the given box using LiDAR and simultaneously generated the scanning trajectories for the camera in real-time to completely and detailly inspect all explored surfaces.
+By replacing time-intensive coarse-to-fine workflows with single-pass missions, these methods reduce human effort on providing priors and enable real-time obstacle avoidance.
+
+However, this paradigm suffered from fundamental flaws.
+User-specified bounding boxes are often imprecise, leading to excessive scanning of non-target areas or missing parts of the intended structure.
+Consequently, performance becomes highly sensitive to the quality of human inputs, which undermines practicality in open-world scenarios.
+Besides, frontier and NBV strategies typically make locally optimal decisions with respect to current volumetric or surface information gain, rather than global coverage of a specific structure.
+Such local decision-making yields globally inefficient and temporally inconsistent trajectories, increasing overall mission time or causing revisits to already well-observed regions.
+
+2.3 Prediction Involvement in Aerial Scanning
+
+Beyond pure exploration, a line of work ( Feng et al. 2023 ; Guédon et al. 2023 ; Chen et al. 2024 ; Liu et al. 2024 ) has recently started to bring predictive capabilities into aerial 3D scanning to provide global context guidance for pursuing higher efficiency, either by explicitly inferring unseen geometry or by learning to anticipate informative views.
+On the geometric side, several methods ( e.g. , Feng et al. 2023 ) trained specialized neural networks bridging mapping and planning.
+They completed the target structure point cloud from partial volumetric maps and then ran coverage planning on the predicted model rather than on the raw, partially observed information.
+This allows the planner to reason about occluded or yet-unseen parts to synthesize more structured paths, compared to purely local frontier or NBV strategies.
+In parallel, the 3D vision community has made rapid progress on point cloud completion and generative 3D modeling, which similarly infer reasonable full shapes from partial observations ( Yuan et al. 2018 ; Aiello et al. 2022 ; Rong et al. 2024 ; Tochilkin et al. 2024 ; Li et al. 2025 ).
+While these models have not yet been deployed on real robotic platforms, they suggest a promising source for future aerial scanning systems.
+On the view-selection side, learning-based approaches ( Guédon et al. 2023 ; Chen et al. 2024 ; Liu et al. 2024 ) replace hand-crafted information gain heuristics with policies or scoring networks trained to rank candidate viewpoints, for example, by reinforcement learning or self-supervision.
+These policies implicitly encode priors about what shapes and configurations are likely and which viewpoints tend to maximize structural coverage in the next step.
+
+Nevertheless, these methods are studied under highly simplified conditions, where the scene typically contains only the target structure, with no target-irrelevant obstacles or cluttered surroundings.
+Evaluation is conducted on limited synthetic benchmark datasets rather than through sustained deployment on real aerial platforms.
+As a result, their practical viability in open-world settings where the target is embedded among many other objects and sensing conditions vary significantly remains unclear.
+In particular, despite encouraging results in controlled environments, there is still no reliable, experimentally validated scheme for endowing drones with robust, generalizable predictive capabilities for 3D structure understanding in the wild.
+
+2.4 Foundation Models in Robotics
+
+Recent years have seen a rapid adoption of foundation models (FMs) in robotics, primarily using large language models (LLMs), vision-language models (VLMs) for ground robots and manipulators.
+LLM-based systems ( Ahn et al. 2022 ; Driess et al. 2023 ) took natural-language prompts to specify high-level tasks and rely on the LLM to perform task decomposition, sub-goal generation, or chain-of-thought reasoning for mobile manipulators.
+In these frameworks, the language model is grounded through affordance critics or embodied encoders, enabling robots to execute multi-step manipulation and navigation tasks directly from free-form textual instructions.
+
+VLM-based approaches ( Zitkovich et al. 2023 ; Zhang et al. 2024a ; Kim et al. 2024 ; Black et al. 2024 ; Zhou et al. 2025 ) extended this idea by jointly leveraging vision and language.
+Uni-NaVid ( Zhang et al. 2024a ) employed pretrained VLMs to interpret language instructions and video observations for a range of navigation tasks ( e.g. , instruction-following, object-goal navigation) within a unified model.
+Vision-language-action models ( Zitkovich et al. 2023 ; Kim et al. 2024 ; Black et al. 2024 ; Zhou et al. 2025 ) further coupled large-scale vision-language pretraining with robot datasets, treating actions as tokens and learning policies that map images and language inputs directly to low-level control.
+These systems have demonstrated broad generalization across many table-top manipulation and indoor navigation tasks and highlight the value of FM backbones as rich semantic priors for robot decision making.
+
+At the same time, FM-in-robotics research follows a data-hungry, end-to-end learning paradigm and is developed for relatively structured, short- to medium-horizon tasks under generous compute budgets.
+Their interfaces to FMs are typically formulated in terms of symbolic task steps, sub-goals, or pixel-space waypoints, rather than explicit 3D spatial representations.
+Consequently, while existing FM-based robotic schemes highlight the potential of large pretrained models to endow robots with scene understanding and world knowledge, they stop short of providing a practical recipe for open-world aerial 3D target structure scanning.
+
+3 Problem Statement
+
+The problem considered in this work is to scan all surfaces of a user-intended 3D structure S ( e.g. , a castle) in an unknown open-world environment W=\{S,O_{1},\dots,O_{N}\} using an autonomous aerial robot, where O_{i} denotes surrounding non-target obstacles ( e.g. , trees, buildings).
+The robot is equipped with a gimbal-mounted RGB camera and a 3D LiDAR sensor, which capture visual and geometric information, respectively.
+It executes a five-degree-of-freedom (DoF) trajectory \mathbf{x}(t) over t\in[0,T] , specifying the 3D position of the drone and the orientation of the camera gimbal ( i.e. , pitch and yaw angle).
+The camera is modeled by a viewing frustum with a limited field of view (FoV) and maximum sensing range; at each time t , only those surface points of S that lie within this frustum and maintain direct line-of-sight visibility are considered visually observed.
+Since the LiDAR’s effective range typically exceeds that of the camera, geometry sensing is rarely the limiting factor, and in practice the bottleneck for usable scan quality lies in the camera.
+Accordingly, in our formulation, overall scanning completeness is effectively governed by the camera coverage.
+
+The motion must satisfy hard safety and feasibility constraints: the drone should not collide with any element of W at any time t and must respect its dynamic limits.
+Given a feasible trajectory \mathbf{x}(t) , we measure efficiency by the total flight time T(\mathbf{x}) , and define an information completeness index C(\mathbf{x})\in[0,1] based on the fraction of the surface of S that is ever seen by the camera along \mathbf{x}(t) .
+Moreover, human involvement is represented through a prior input h with an associated qualitative effort measure E(h) .
+We do not assume a precise numerical model of E(h) .
+Instead, it reflects the relative level of human effort required by different forms of prior input.
+Intuitively, abstract, semantic, or easily specified inputs ( e.g. , text descriptions or sparse visual annotations) that are far from low-level control signals correspond to lower E(h) , whereas more concrete specifications or priors that require external data collection (such as 3D bounding box, pre-defined trajectory, satellite imagery, or 3D models) entail higher E(h) .
+To summarize these considerations, we characterize the task as a multi-objective problem over
+
+\mathbf{J}(\mathbf{x},h)=\big(T(\mathbf{x}),\,1-C(\mathbf{x}),\,E(h)\big), (1)
+
+which captures the competing objectives of flight efficiency, coverage completeness, and human effort.
+This formulation is purely illustrative and is not intended to be explicitly optimized.
+Conceptually, it serves to formalize the design principles that motivate our system architecture, which seeks to achieve shorter flight time and more comprehensive visual coverage while relying solely on low-effort prior inputs from humans.
+
+4 System Overview
+
+Figure 3: System architecture of F ly C o.
+Given a human prompt, the system runs a closed-loop pipeline: leveraging FMs, perception grounds the target in 2D/3D from streaming RGB-LiDAR, and multi-modal prediction completes the target surface from partial observations; the planner asynchronously performs consistency-aware global coverage planning over the predicted geometry with real-time local trajectory replanning.
+All modules are continuously updated until the mission terminates.
+
+As illustrated in Fig. 3 , F ly C o operates as a closed-loop system that starts from abstract human prompts and ends with a complete scan of the user-intended structure.
+At the beginning of a mission, the user provides a high-level prompt h ( i.e. , a textual description and sparse visual annotations on the onboard camera view) to specify the target structure S .
+As the drone flies, F ly C o processes real-time streaming RGB images and LiDAR data with cross-modal refinement to continuously and precisely segment the target in cluttered 3D environments, thereby grounding the user prompt in the physical target structure (Sec. 5.1 Prompt-grounded Scene Perception ).
+The resulting segmented visual and geometric observations of S are then fused with the original textual prompt to infer a complete 3D surface representation of the target structure, including parts that have not yet been observed while remaining faithful to current measurements (Sec. 5.2 Multi-modal Surface Prediction ).
+The predicted geometry serves as an intermediate bridge that distills the unknown and complicated open-world scanning task into a structured coverage planning problem with a clear global context.
+Based on the latest prediction, F ly C o correspondingly plans a target-centric and efficient coverage path that balances short travel distances and flight consistency, surveying all unobserved structure areas without redundant scans.
+In parallel, using the online map and following global paths, it dynamically generates the executable trajectory for the drone in real-time to ensure safety and information completeness. (Sec. 5.3 Prediction-aware Hierarchical Planning )
+New sensor measurements together with the latest derived odometry and mapping results incrementally update perception and prediction, which in turn refine the planning objectives over time.
+This loop repeats until the system autonomously detects that the target surface is sufficiently covered. F ly C o then terminates the mission and delivers all scanned data to the user.
+Throughout the above computation, all components run asynchronously in separate threads, reconciling slow FM-driven scene understanding with fast flight skills to execute the mission efficiently, accurately, and safely with low human effort.
+
+5 Methodology
+
+5.1 Prompt-grounded Scene Perception
+
+The primary role of the perception module is to interpret abstract user prompts and determine “ what to scan ” at each moment.
+It translates textual descriptions and visual annotations into precise pixel-level and point-level target segmentation in complex 3D environments from streaming RGB and LiDAR data.
+Recent advances in visual segmentation foundation models, such as SAM2 ( Ravi et al. 2024 ), provide strong generic priors for object delineation and temporally consistent mask propagation in videos, making them a natural backbone for prompt-target grounding.
+However, SAM2 natively supports only interactive visual inputs (points, boxes, and masks) and therefore cannot directly handle free-form textual prompts.
+To enable text-conditioned segmentation, we integrate knowledge from VLMs such as BEiT3 ( Wang et al. 2023 ) into SAM2 via an early-fusion scheme ( Zhang et al. 2024b ), which alleviates segmentation ambiguities that arise when using text or visual prompts alone.
+Nevertheless, naively applying such off-the-shelf models is still insufficient for our task, due to two key challenges: (1) adapting them to real-time streaming data, and (2) transferring their segmentation capability to 3D LiDAR data while ensuring robust target grounding across viewpoints and over long-horizon flights.
+
+5.1.1 Streaming-efficient Adaptation for SAM2
+
+The first practical challenge is that SAM2 is designed for offline video segmentation: it maintains a growing memory bank over all video frames to propagate masks, causing GPU memory usage and runtime to increase with sequence length.
+In our long-horizon aerial scanning setting, where the drone may fly for thousands of frames, this behavior is impractical for onboard deployment.
+Moreover, the original SAM2 model is computationally heavy for edge-computing aerial platforms, making real-time processing of streaming image data infeasible.
+We address these issues with two key designs.
+Instead of storing all frames, we maintain a sliding-window memory bank that retains only the most recent W_{m} segmentation results, discarding older entries and thereby keeping the memory footprint bounded over long flights.
+In parallel, we optimize the SAM2 backbone for onboard inference via lightweight quantization and graph-level compilation, which reduce per-frame latency without retraining.
+
+5.1.2 Cross-modal Refinement for Robust Target Grounding
+
+As for the second challenge, a straightforward idea is to project the segmented 2D masks from the camera images onto the 3D LiDAR points using known extrinsics and intrinsics to identify the target structure in 3D space.
+However, this naive projection entirely relies on the accuracy and robustness of 2D segmentation, which may fluctuate or fail under strong viewpoint changes and occlusions during long-horizon flights (Sec. 7.3.1 Ablations on Perception ).
+To overcome this limitation, we propose a cross-modal refinement mechanism that jointly leverages visual and geometric cues to stabilize target grounding, as summarized in Algo. 1 .
+
+In parallel to 2D segmentation, an independent branch processes the raw LiDAR point cloud.
+At the beginning of a mission, the initial LiDAR data is partitioned into multiple groups using a density-based clustering algorithm ( Ester et al. 1996 ) that accounts for both point density and spatial proximity.
+Each cluster is then projected onto the image plane, and its overlap with the 2D mask in the first frame is evaluated.
+Clusters whose projected points lie entirely within the mask are labeled as belonging to the target structure.
+During subsequent frames, geometric clustering is updated incrementally for computational efficiency: newly acquired LiDAR points are assigned to the nearest existing cluster if within a distance threshold, while points sufficiently far from all clusters are used to spawn new ones.
+This yields a continuously updated geometric estimate of the target in 3D space.
+
+Algorithm 1 Cross-modal Refinement Mechanism
+
+Given the current geometric clustering, we first use it to choose informative and temporally stable keyframes from the memory bank.
+Vanilla SAM2 simply selects the most recent W_{s} frames ( W_{s}<W_{m} ) as memory keyframes for next-frame tracking, which ignores temporal consistency and geometric support, and can lead to drift.
+To encode the temporal coherence of 2D masks, we maintain a linear Kalman filter over their motion in image space. The state vector is defined as
+
+\mathbf{b}=[b_{x},b_{y},b_{w},b_{h},\dot{b}_{x},\dot{b}_{y},\dot{b}_{w},\dot{b}_{h}]^{\top}, (2)
+
+where (b_{x},b_{y}) denote the center of the minimum bounding box of the segmentation, b_{w},b_{h} its width and height, and the remaining entries their velocities.
+Using a constant-velocity motion model \mathbf{F} , the state prediction at time t is
+
+\hat{\mathbf{b}}_{t|t-1}=\mathbf{F}\hat{\mathbf{b}}_{t-1|t-1}. (3)
+
+We then quantify the temporal consistency of the current 2D mask M_{t} by the box Intersection-over-Union (IoU) between \hat{\mathbf{b}}_{t|t-1} and the bounding box of M_{t} ,
+
+s_{\text{kf}}=\texttt{BoxIoU}(\hat{\mathbf{b}}_{t|t-1},M_{t}). (4)
+
+The Kalman update step,
+
+\hat{\mathbf{b}}_{t|t}=\hat{\mathbf{b}}_{t|t-1}+\mathbf{G}_{t}\big(M_{t}-\mathbf{H}\hat{\mathbf{b}}_{t|t-1}\big), (5)
+
+with gain \mathbf{G}_{t} and observation model \mathbf{H} , keeps the tracker locked to the current segmentation.
+Concurrently, we measure cross-modal geometric consistency by projecting the current 3D target cluster onto the image and computing the pixel-level IoU between the projected mask M^{\text{proj}}_{t} and the 2D mask M_{t} ,
+
+s_{\text{geo}}=\texttt{PixelIoU}(M^{\text{proj}}_{t},M_{t}). (6)
+
+For each candidate frame in the memory bank, we combine its temporal consistency and geometric alignment into a single keyframe score
+
+s_{i}=s_{\text{kf},i}+s_{\text{geo},i}, (7)
+
+where s_{\text{kf},i} and s_{\text{geo},i} are computed as above for frame i .
+Instead of naively keeping the latest W_{s} frames, we select the top- W_{s} frames with the highest s_{i} as keyframes for SAM2’s memory attention, favoring frames that are both temporally stable and geometrically representative for achieving robust 2D mask propagation.
+
+Finally, the 3D cluster also serves as an anchor to detect and correct misidentification or drift in 2D segmentation over time.
+At each frame, we compare the current 2D mask M_{t} with the projection M^{\text{proj}}_{t} of the geometric target cluster via box IoU.
+If this score falls below a threshold \kappa_{\text{reinit}} , we regard the two modalities as inconsistent, indicating either segmentation drift or corrupted clustering.
+In this case, we perform a cross-modal re-initialization: a subset of target points is selected from current target 3D cluster by farthest-point sampling (FPS) and projected to the image as virtual prompt points; these prompts are fed back to SAM2 with the original textual prompt to obtain a corrected mask, while the Kalman filter is re-initialized and geometric clustering is updated on the new result.
+Conversely, when the IoU stays above \kappa_{\text{reinit}} , both visual and geometric estimates are considered reliable, and the geometric information is used solely for keyframe selection as described above.
+This bidirectional interaction—using 3D geometry to both repair and curate 2D memory—substantially improves the robustness of target grounding across viewpoints and over long-horizon flights.
+The cross-refined 2D and 3D target regions with raw data are populated into a shared buffer, serving as the input for the prediction and planning stages.
+
+5.1.3 Simultaneous Localization and Mapping (SLAM)
+
+Our aerial system achieves robust localization by fusing raw LiDAR point clouds with IMU data via a LiDAR-inertial odometry algorithm ( Xu et al. 2022 ).
+To efficiently manage 3D information for facilitating downstream processes, we maintain two distinct representations of the environment: an Occupancy Grid Map (OGM) and a Euclidean Signed Distance Field (ESDF).
+The OGM is updated in real-time by integrating newly localized LiDAR scans.
+Based on preceding segmentation results, each occupied voxel is classified as either “target” or “non-target”.
+Concurrently, the ESDF is incrementally computed from the OGM to support efficient collision checking during trajectory optimization.
+
+5.2 Multi-modal Surface Prediction
+
+Figure 4: Overview of our multi-modal surface predictor.
+It first independently encodes each modality with foundation models, fuses heterogeneous features via alternating attention, and decodes the completed shape supervised by joint partial and completion Chamfer losses.
+
+This module answers “ what the full structure looks like ” by predicting a complete 3D surface of the target from partial observations, empowering planning with comprehensive structural knowledge of the target.
+Concretely, it consumes three observation sources: (1) segmented 3D points from the perception module, (2) the corresponding segmented RGB images, and (3) the original textual prompt describing the target’s global semantics.
+Relying on a single modality is fundamentally insufficient in our setting.
+Purely geometric completion from LiDAR is severely constrained: as unordered 3D points without texture or rich semantic cues, 3D coordinates provide weak evidence about object parts, especially across large unobserved regions.
+As a result, they tend to lean heavily on learned shape priors and often fail on out-of-distribution structures.
+Conversely, vision and language FMs offer strong zero-shot generalization in isolation, but predictions obtained directly from a single visual or textual modality are geometrically ill-posed: without accurate metric scale or camera poses, they struggle to produce surfaces that match physical measurements.
+Multi-modal fusion that exploits the complementarity among these signals is therefore essential to realize the “ bridging ” role of prediction in our system (Sec. Multi-modal conditioning. ).
+To this end, we design a multi-modal surface prediction network together with an efficient training-inference pipeline that jointly encodes and fuses geometric, visual, and textual features, effectively incorporating foundation-model knowledge to infer a complete 3D surface of the target with correct metric scale, fine-grained granularity, globally plausible shape, and local fidelity to the inputs, as depicted in Fig. 4 .
+
+5.2.1 Multi-modal Inputs and Preprocessing
+
+The geometric input \mathcal{P}_{\text{tar}} is obtained by collecting all voxels labeled as “target” in the latest OGM, converting them into 3D points, and downsampling to a fixed set of N_{i} points using FPS.
+For the visual input \mathcal{I}_{\text{tar}} , we project \mathcal{P}_{\text{tar}} onto the image plane of each segmented RGB frame from the perception module and compute the fraction of projected points that fall inside the corresponding 2D mask.
+The frame with the highest fraction is selected as \mathcal{I}_{\text{tar}} , ensuring that the most informative view of the target is used.
+We also record the associated camera parameters \mathbf{g}_{\text{tar}}=\mathbf{K}\big[\mathbf{R}_{\text{tar}}\mid\mathbf{t}_{\text{tar}}\big] for later use, where \mathbf{K} , \mathbf{R}_{\text{tar}} , and \mathbf{t}_{\text{tar}} denote the intrinsic matrix, rotation matrix, and translation vector, respectively.
+The textual input h_{\text{text}} is directly taken from the user’s original prompt.
+To stabilize training and handle targets of varying physical scales, we apply a local normalization to both \mathcal{P}_{\text{tar}} and \mathbf{g}_{\text{tar}} using the centroid \mathbf{c}_{\text{tar}} and scale s_{\text{tar}} of \mathcal{P}_{\text{tar}} :
+
+{\mathcal{P}}_{\text{tar}}=\frac{\mathcal{P}_{\text{tar}}-\mathbf{c}_{\text{tar}}}{s_{\text{tar}}},\quad{\mathbf{t}}_{\text{tar}}=\frac{\mathbf{t}_{\text{tar}}-\mathbf{c}_{\text{tar}}}{s_{\text{tar}}}. (8)
+
+For notational simplicity, we reuse \mathcal{P}_{\text{tar}} and \mathbf{g}_{\text{tar}} to denote the normalized point cloud and camera pose in the following.
+Based on these inputs, our multi-modal predictor f_{\theta} learns a mapping from \{\mathcal{P}_{\text{tar}},\mathcal{I}_{\text{tar}},\mathbf{g}_{\text{tar}},h_{\text{text}}\} to the complete surface \mathcal{P}_{\text{comp}} of the target structure with N_{o} points,
+
+f_{\theta}:(\mathcal{P}_{\text{tar}},\mathcal{I}_{\text{tar}},\mathbf{g}_{\text{tar}},h_{\text{text}})\mapsto\mathcal{P}_{\text{comp}}\in\mathbb{R}^{N_{o}\times 3}. (9)
+
+5.2.2 Network Architecture
+
+At a high level, our predictor f_{\theta} adopts a feed-forward, post-fusion architecture with three stages: independent encoding of each modality, geometry-semantics fusion, and geometric decoding.
+The design is guided by two principles: (1) retain only minimal 3D inductive bias in the network, so that most structural priors come from ample 3D-annotated data and FMs rather than hand-crafted features; and (2) maximally reuse rich world knowledge from existing vision-language FMs, while explicitly steering this knowledge into the geometric stream that ultimately defines the 3D surface.
+Specifically, we let language and vision FMs first produce rich, task-agnostic embeddings, and defer multi-modal interaction to a late fusion stage where the geometric branch queries these embeddings through alternating self-cross attention layers.
+In this way, the fusion layer primarily aligns and retrieves semantic context for geometry, keeping the overall architecture simple while allowing the 3D predictions to benefit directly from the expressive latent spaces of FMs and enabling inference compatible with closed-loop flight.
+
+Instead of training heavy encoders from scratch, we reuse pre-trained FMs to obtain compact latent representations for language and imagery.
+In particular, we use the text encoder in SigLIP ( Zhai et al. 2023 ) to derive a textual tokens \mathcal{F}_{\text{text}}\in\mathbb{R}^{1\times D_{\text{t}}} from the prompt h_{\text{text}} , and apply DINO ( Oquab et al. 2023 ) to the input image \mathcal{I}_{\text{tar}} , yielding a set of K patchified tokens \mathcal{F}_{\mathcal{I}}\in\mathbb{R}^{K\times D_{\mathcal{I}}} .
+This strategy avoids costly encoder training, accelerates convergence, and injects broad semantics about spatial structures into our predictor.
+
+Given the current lack of powerful 3D FMs comparable to vision-language models, we deliberately adopt a lightweight PointNet++ backbone ( Qi et al. 2017 ) to encode the partial point cloud \mathcal{P}_{\text{tar}} into geometric features \mathcal{F}_{\mathcal{P}}\in\mathbb{R}^{N_{i}\times D_{\mathcal{P}}} .
+This design allows the geometric branch focus on capturing local shape patterns while high-level semantics and world priors are injected later through the fusion stage.
+All three feature sets are then projected to a common feature dimension D_{\text{f}} using individual linear layers.
+
+While vision FMs provide strong generalizable knowledge, their representations are largely spatially agnostic with respect to the metric 3D frame: the same image feature may correspond to very different physical scales or viewpoints.
+To mitigate this issue, we incorporate camera parameters \mathbf{g}_{\text{tar}} into each layer of DINO via parameter-efficient feature modulation.
+A small MLP predicts per-channel scale and shift terms
+
+[\boldsymbol{\gamma},\boldsymbol{\beta}]=\mathrm{MLP}(\mathbf{g}_{\text{tar}}), (10)
+
+which modulate the visual features as
+
+\mathcal{F}_{\mathcal{I}}\leftarrow(\mathbf{1}+\boldsymbol{\gamma})\odot\mathcal{F}_{\mathcal{I}}+\boldsymbol{\beta}, (11)
+
+where \odot denotes element-wise multiplication.
+This conditioning makes \mathcal{F}_{\mathcal{I}} aware of 3D spaces with negligible additional parameters, easing subsequent alignment with geometric features.
+
+To simplify multi-modal fusion among these heterogeneous features, we group them into two types: a geometric one \mathcal{F}_{\mathcal{P}} and a semantic one obtained by concatenating visual and textual features,
+
+\mathcal{F}_{\text{S}}=\mathcal{F}_{\mathcal{I}}\oplus\mathcal{F}_{\text{text}}, (12)
+
+where \oplus denotes concatenation along the feature dimension.
+The core of our fusion stage is the proposed alternating-attention layers, aligning two information sources into a shared latent space effectively.
+Each layer consists of geometry-wise and semantic-wise self-attention followed by global cross-attention:
+
+\displaystyle\widehat{\mathcal{F}_{\mathcal{P}}} \displaystyle=\mathrm{SelfAttention}(\mathcal{F}_{\mathcal{P}}), (13) \displaystyle\widehat{\mathcal{F}_{\text{S}}} \displaystyle=\mathrm{SelfAttention}(\mathcal{F}_{\text{S}}), \displaystyle\widetilde{\mathcal{F}_{\mathcal{P}}} \displaystyle=\mathrm{CrossAttention}(\widehat{\mathcal{F}_{\mathcal{P}}},\widehat{\mathcal{F}_{\text{S}}}).
+
+Geometry-wise self-attention captures intra-structural relations and details within the partial 3D shape, while semantic-wise self-attention aligns and consolidates prior knowledge coming from separate vision and language FMs.
+
+Crucially, in global cross-attention, we treat the geometric features as query and the fused semantic features as key and value.
+This directional design reflects our modeling goal: the geometric features actively inherit world knowledge embedded in these FMs and draw upon the rich contextual information from semantic modalities.
+This fashion allows the network to effectively “grow” a complete 3D shape from partially observed parts by absorbing complementary guidance from the image and text.
+By stacking L such layers, we obtain a deeply fused representation \widetilde{\mathcal{F}_{\mathcal{P}}} that encodes both the local measured geometry and global semantic priors in a unified latent space.
+Notably, Sec. Alternating attention for knowledge fusion. confirms that this fusion scheme effectively harvests FM knowledge into geometric predictions.
+
+The final decoding stage maps the fused geometric feature back into 3D space.
+A MLP first predicts a set of candidate 3D points from \widetilde{\mathcal{F}_{\mathcal{P}}} .
+To preserve the characteristics of the input surface while extrapolating into unobserved regions, we concatenate these predicted points with the original partial input \mathcal{P}_{\text{tar}} and apply farthest-point sampling to obtain a fixed-size output point cloud,
+
+\mathcal{P}_{\text{comp}}=\mathrm{FPS}\big(\mathrm{MLP}(\widetilde{\mathcal{F}_{\mathcal{P}}})\oplus\mathcal{P}_{\text{tar}}\big)\in\mathbb{R}^{N_{o}\times 3}, (14)
+
+In this way, the resulting \mathcal{P}_{\text{comp}} augments the physically measured surface with semantically guided completions and remains directly usable as a metric 3D representation.
+
+5.2.3 Training Objectives
+
+As a source of foresight for planning, the predictor is required to satisfy two complementary objectives.
+First, it must recover the complete surface of the target structure so that the planner can reason about occluded and yet-unseen regions and optimize global coverage.
+Second, it must remain strictly faithful to the partial observations provided by the LiDAR, preserving fine details on already observed surfaces and preventing the network from “ correcting ” valid measurements to avoid guiding redundant scans.
+In practice, many completion methods that optimize only for global completeness (for example, by minimizing a symmetric distance to the full ground truth ( Yuan et al. 2018 ; Yu et al. 2021 ; Rong et al. 2024 )) tend to hallucinate shapes that deviate from the input, a pathology that becomes particularly severe on complex or out-of-distribution structures.
+
+Prior works, such as SDS-Complete ( Kasten et al. 2023 ), enforce consistency with the input by maintaining an auxiliary implicit representation ( e.g. , a neural signed distance field) and constraining the partial observations to lie on its zero-level set.
+While effective, such schemes introduce expensive additional memory and computation overhead due to the extra representation that must be stored and updated during training.
+Instead, we adopt a simple yet effective dual-objective supervision strategy that encodes both completeness and input consistency directly at the point-set level, without any auxiliary fields (Sec. Partial-surface regularization. ).
+
+Our formulation is built on the permutation-invariant Chamfer distance (CD), used in both undirected and directed forms (denoted by \mathrm{CD}_{\mathrm{u}} and \mathrm{CD}_{\mathrm{d}} ), defined for point sets \mathcal{X},\mathcal{Y}\subset\mathbb{R}^{3} as
+
+\displaystyle\mathrm{CD}_{\mathrm{u}}(\mathcal{X},\mathcal{Y}) \displaystyle=\frac{1}{|\mathcal{X}|}\sum_{x\in\mathcal{X}}\min_{y\in\mathcal{Y}}\|x-y\|_{2}^{2}+ (15) \displaystyle\frac{1}{|\mathcal{Y}|}\sum_{y\in\mathcal{Y}}\min_{x\in\mathcal{X}}\|x-y\|_{2}^{2},
+
+\mathrm{CD}_{\mathrm{d}}(\mathcal{X},\mathcal{Y})=\frac{1}{|\mathcal{Y}|}\sum_{y\in\mathcal{Y}}\min_{x\in\mathcal{X}}\|x-y\|_{2}^{2}. (16)
+
+To promote global completeness, we minimize the undirected CD between the prediction \mathcal{P}_{\text{comp}} and the ground-truth surface \mathcal{P}_{\text{gt}} , termed as \mathcal{L}_{\text{comp}}=\mathrm{CD}_{\mathrm{u}}(\mathcal{P}_{\text{comp}},\mathcal{P}_{\text{gt}}) .
+To enforce faithfulness to measurements with negligible extra training burden, we add a partial-surface regularization term given by the directed CD from the prediction \mathcal{P}_{\text{comp}} to the input partial point cloud \mathcal{P}_{\text{tar}} , termed as \mathcal{L}_{\text{par}}=\mathrm{CD}_{\mathrm{d}}(\mathcal{P}_{\text{comp}},\mathcal{P}_{\text{tar}}) .
+Our overall training loss function thus reads
+
+\mathcal{L}=\mathcal{L}_{\text{comp}}+\mathcal{L}_{\text{par}}. (17)
+
+Figure 5: Automatic multi-modal data generation pipeline, which synthesizes partial point clouds, RGB images, and textual descriptions from the original 3D models.
+
+5.2.4 Automatic Multi-modal Data Generation
+
+Training the proposed multi-modal predictor requires large quantities of aligned data across 3D geometry, images, camera poses, and text.
+However, existing datasets rarely provide all these modalities in a consistent form.
+We therefore build an automatic data generation pipeline supported by FMs (Fig. 5 ) that converts raw 3D assets into synchronized point clouds, RGB views, camera parameters, and textual descriptions at scale.
+
+Given a 3D model, we use Blender 1 1 1 https://www.blender.org/ to render 32 RGB-depth pairs from cameras placed uniformly on a viewing sphere around it, with distance equal to twice the radius of the model’s bounding sphere and fixed intrinsics.
+Each depth map is back-projected into 3D to obtain a per-view point cloud.
+The complete ground-truth cloud \mathcal{P}_{\text{gt}} is constructed by merging the points from all views.
+To generate diverse partial observations, we repeatedly sample a random subset of 1 - 8 viewpoints and fuse their points into a single input cloud \mathcal{P}_{\text{tar}} in 32 times.
+This stochastic strategy yields a wide distribution of inputs, from very sparse to densely populated partial views, which is crucial for the model’s robustness.
+
+To attach a global textual prompt to each 3D asset, we build an automatic captioning tool on top of the rendered multi-view images.
+For each rendered RGB view, a pre-trained image captioning model ( Li et al. 2023 ) produces five candidate sentences, and CLIP ( Radford et al. 2021 ) scores them against the corresponding image; the top-scoring one is kept as the view-level caption.
+All view-level captions for a given asset are then passed to GPT-4 ( Achiam et al. 2023 ), which fuses them into a single, globally consistent description by removing view-dependent details, merging redundancies, and normalizing style.
+The resulting captions are short, single-sentence, model-centric descriptions that emphasize overall shape, appearance, and salient geometric structure, such as “ a stone Gothic church featuring a slender spire. ”
+These consolidated sentences serve as the textual input h_{\text{text}} used during training, and are designed to match the abstraction level of human prompts at test time.
+
+Each training sample is formed as an aligned tuple (\mathcal{P}_{\text{tar}},\mathcal{I}_{\text{tar}},\mathbf{g}_{\text{tar}},h_{\text{text}},\mathcal{P}_{\text{gt}}) .
+Here, \mathcal{P}_{\text{tar}} and \mathcal{I}_{\text{tar}} with its camera parameters \mathbf{g}_{\text{tar}} are randomly selected.
+To enhance generalization, we apply several augmentations during training.
+Variations in camera intrinsics are simulated by cropping the rendered RGB images—an efficient method that enhances robustness to different sensors without computationally expensive re-rendering.
+Robustness to camera pose noise is improved by applying random \text{SE}(3) perturbations to the camera extrinsics, i.e. , injecting small translations and rotations into the camera pose.
+We further reduce sensitivity to the absolute world frame by randomly shifting the coordinate origin via a global translation of the input coordinates.
+The diversity of the input is further enriched by applying a random masking operation to the partial point clouds, which varies their point density and spatial distribution.
+
+Overall, this fully automatic pipeline generates large-scale, consistently aligned multi-modal data without manual labeling and can be readily extended to more 3D assets, forming a practical basis for future scaling of the predictor.
+
+Figure 6: Inference-time Geometry Densification Scheme.
+Starting from sparse completion, it applies cascade upsampling adaptive to physical granularity, then extracts a watertight mesh.
+
+5.2.5 Inference-time Geometry Densification
+
+While the predictor already outputs a complete surface in the form of a fixed-size point set \mathcal{P}_{\text{comp}} , a single resolution cannot accommodate the wide range of target scales encountered in practice.
+For instance, a point budget that is sufficient to describe a small gate becomes too sparse for a large building facade, causing loss of fine details and, thereby hindering the provision of accurate guidance for planning.
+Blindly increasing the network output size would inflate training and inference cost, and is unnecessary for smaller targets.
+Instead, we decouple prediction quality from network output resolution by introducing a lightweight, inference-time densification scheme, as shown in Fig. 6 .
+
+Concretely, we train a small family of independent upsampling networks that map \mathcal{P}_{\text{comp}} to progressively denser point sets with 2N_{o},3N_{o},\dots,kN_{o} points, using the same dual-objective supervision as the main predictor.
+At inference time, given the normalized prediction \mathcal{P}_{\text{comp}} , we apply these upsamplers in ascending order of density.
+For each upsampled result \mathcal{P}^{(r)}_{\text{dense}} , we rescale it back to the original metric frame by inversely applying the normalization in Eq. ( 8 ), and compute the minimum pairwise distance between points.
+Once this spacing falls below a prescribed resolution threshold \rho_{\text{min}} , we regard the current density as sufficient for the target and stop the cascade, taking the corresponding point cloud as the final densified prediction \mathcal{P}_{\text{dense}}^{*} .
+This procedure provides scale-adaptive geometric detail while adding only modest computation and no extra supervision to the core predictor.
+
+Figure 7: Overview of our prediction-aware hierarchical planner.
+A consistency-aware global thread builds viewpoints over the predicted mesh and solves ATSP in parallel to populate a global coverage path buffer, meanwhile a real-time local thread concurrently generates minimum-time, feasible, and safe trajectories with complete target coverage.
+
+We then refine \mathcal{P}_{\text{dense}}^{*} into a watertight mesh \mathcal{S}_{\text{mesh}}=(V_{\text{mesh}},E_{\text{mesh}}) using NKSR ( Huang et al. 2023 ).
+Before meshing, we perform a standard hidden-point-removal operation (GHPR) ( Katz and Tal 2015 ) to suppress outliers and small floaters induced by noise, which improves the geometric reliability of the final surface.
+The resulting \mathcal{S}_{\text{mesh}} is directly consumed by the planner, giving it a scale-appropriate, metrically consistent geometric representation without enlarging the main prediction network.
+
+5.3 Prediction-aware Hierarchical Planning
+
+As the decision-making component of our system, the planner addresses “ how to scan ” under predictive foresight, both efficiently and safely.
+Although the perception-prediction stack transforms the original open-world problem into a clear 3D coverage task over a predicted target structure, three key difficulties prevent the direct application of off-the-shelf coverage planners ( Cao et al. 2020 ; Wu et al. 2024 ; Du et al. 2025 ).
+First, the predicted geometry is inherently time-evolving: as new observations arrive, the completed surface is progressively refined.
+Existing planners are typically designed as offline, one-shot solvers on static models and treat each updated prediction as an independent coverage problem, disregarding past plans.
+Such snapshot-wise planning often yields paths that are locally optimal but temporally inconsistent, leading to detours or back-and-forth motions that inflate total flight time.
+This calls for temporally consistent coverage planning, where updates to the predicted geometry induce smooth adjustments of the planned path rather than drastic reversals of flight intent.
+Second, these methods frequently struggle to produce high-quality paths promptly due to their reliance on combinatorial optimization formulations.
+It makes computation increasingly expensive for large targets, hindering timely adaptation to evolving predictions and potentially wasting flight time on regions derived from outdated geometry.
+Therefore, rapid computation is essential for improving mission efficiency.
+Third, even with prediction filling in unseen parts of the target, the surrounding environment remains previously unseen obstacles that may emerge at any time, requiring the planner to react with low latency to maintain safety.
+Yet existing solutions tightly couple coverage path generation and trajectory optimization, causing the update rate scale with the size of the target and undermining safe, agile operation in large, cluttered environments.
+
+These challenges motivate our prediction-aware hierarchical planning framework, which decouples long-horizon objectives—information completeness and mission efficiency—from the immediate requirement of real-time safety while staying consistent and computationally efficient under the evolving predicted geometry.
+The following subsections detail this framework and its two asynchronously executed planning layers.
+
+5.3.1 Planning Framework Overview
+
+As illustrated in Fig. 7 , our planner is organized as a two-layer hierarchy that runs asynchronously at different rates.
+A global layer computes coverage paths over the predicted target geometry at a deliberative rate r_{\text{G}} , and a high-rate local layer ( r_{\text{L}}\gg r_{\text{G}} ) continuously adjusts the executable trajectory using the online map while following the intent of the global path.
+
+At the higher level, the global planner targets long-horizon efficiency and structural coverage.
+At each planning cycle, it ingests the latest predicted target mesh \mathcal{S}_{\text{mesh}} and rapidly constructs a globally efficient, target-centric coverage path \mathbf{P}_{\text{G}} .
+This path is designed to (1) cover all yet-unobserved regions of the target with short travel distance, and (2) remain consistent with the historical flight to avoid unnecessary revisits and detours.
+Specifically, the planner first generates a minimal set of safe viewpoints \mathcal{V}_{\text{G}} that jointly observe all uncovered surface patches, and then efficiently determines a traversal order that approximately minimizes path length, inserting safe intermediate waypoints as needed to form a continuous \mathbf{P}_{\text{G}} .
+Crucially, temporal-consistency awareness is incorporated throughout both stages, ensuring that successive refinements of \mathcal{S}_{\text{mesh}} induce smooth evolutions of the coverage path.
+Furthermore, we introduce two acceleration techniques to enhance computational tractability: fast safety checking for candidate viewpoints and a skeleton-based decomposition that enables parallelized path optimization.
+
+At the lower level, the local planner handles real-time safety and dynamic trajectory adaptation.
+At each update, it queries the most recent \mathbf{P}_{\text{G}} and extracts the portion lying within a finite planning horizon H ahead of the current drone position, denoted \mathbf{P}_{\text{L}} .
+Using the current ESDF and OGM, \mathbf{P}_{\text{L}} is first refined by the A* algorithm ( Hart et al. 1968 ) to ensure it lies entirely within the free space.
+Afterwards, the local planner aims to convert \mathbf{P}_{\text{L}} into a minimum-time, dynamically feasible, collision-free, and smooth trajectory in real-time.
+Meanwhile, this trajectory must also preserve the intended target coverage along \mathbf{P}_{\text{L}} to reduce detours induced by backtracking motions (Sec. Viewpoint-constrained trajectory optimization. ).
+To this end, a tailored viewpoint-constrained trajectory optimization is formulated, rigorously guaranteeing the above requirements while safeguarding real-time computability.
+Finally, the resulting trajectory is transformed into low-level commands to a PID controller augmented with an online Extended State Observer ( Han 2009 ) for robust execution.
+
+This purpose-built planning framework directly addresses the challenges outlined above: it plans a temporally consistent global coverage path timely as the predicted structure is refined, and sustains low-latency responses to newly revealed obstacles regardless of target scale (Sec. Asynchronous computation framework. ).
+
+Figure 8: Illustration and comparison of safe-configuration checks in a 2D example: (A) SDF-based evaluation, (B) Ray casting, and (C) the proposed inlier-based method. The red star denotes the viewpoint candidate to be checked.
+
+5.3.2 Consistency-aware Global Coverage Planning on Predicted Geometry
+
+Viewpoint generation first requires a safe configuration space to exclude viewpoints inside \mathcal{S}_{\text{mesh}} (essential to avoid collision risks from surface penetration).
+Conventional methods face a trade-off: SDFs are reliable but computationally costly for large structures, while faster ray casting algorithm suffers errors in complex non-convex geometries.
+To reconcile safety and efficiency, our solution takes both strengths in two steps:
+(1) identifying inliers within \mathcal{S}_{\text{mesh}} and (2) verifying viewpoint safety via ray intersection tests (Fig. 8 ).
+
+We use a cutting plane method to compute inliers of \mathcal{S}_{\text{mesh}} .
+For efficiency, we downsample \mathcal{S}_{\text{mesh}} vertices to a manageable number ( e.g. , 100) using FPS as representatives, then determine inliers for each.
+For each representative, we first find an optimal cutting plane (its orientation \mathbf{n}_{\text{opt}} ) minimizing angular variance relative to normals ( \mathcal{N}_{\text{v}} ) of neighboring vertices.
+This is solved iteratively via quadratic programming:
+
+\mathbf{n}_{\text{opt}}^{i+1}=\mathop{\arg\min}_{\mathbf{n}_{\text{opt}}\in\mathbb{R}^{3},||\mathbf{n}_{\text{opt}}||_{2}=1}{\mathbf{n}_{\text{opt}}^{i}}^{\mathsf{T}}\text{Cov}^{i}(\mathcal{N}_{\text{v}})\mathbf{n}_{\text{opt}}^{i}, (18)
+
+where i is the iteration index, and \text{Cov}^{i}(\mathcal{N}_{\text{v}}) is the covariance matrix of neighboring vertex normals for the current plane.
+This quadratic problem is solved analytically via singular value decomposition, starting from a random \mathbf{n}_{\text{opt}}^{0} .
+Upon \mathbf{n}_{\text{opt}} convergence, the corresponding inlier \mathbf{p}_{\text{inlier}} is calculated as:
+
+\mathop{\arg\min}_{\mathbf{p}_{\text{inlier}}\in\mathbb{R}^{3}}\sum\limits_{\mathbf{n}_{\text{v}}\in\mathcal{N}_{\text{v}}}||(\mathbf{p}_{\text{inlier}}-\mathbf{p}_{\text{v}})\times\mathbf{n}_{\text{v}}||_{2}^{2}, (19)
+
+where \mathbf{p}_{\text{v}} is the position of neighboring vertices on the optimal plane.
+Intuitively, \mathbf{p}_{\text{inlier}} represents the closest confluence of lines through each normal in \mathcal{N}_{\text{v}} ; this point is robustly positioned within \mathcal{S}_{\text{mesh}} due to the mesh’s closed-surface property.
+
+Inliers are organized into a KD-tree for efficient querying.
+For each viewpoint candidate, we retrieve its nearest inlier, cast a finite ray from itself to this inlier, and test intersections with \mathcal{S}_{\text{mesh}} .
+Safety is determined by intersection parity: an odd count indicates the viewpoint is outside the mesh, while an even count indicates it is inside.
+Sec. Fast generation of safe configuration space. shows this method achieves reliable safety checks with high efficiency.
+
+We next generate a minimal viewpoint set \mathcal{V}_{\text{G}} that ensures full coverage of all currently unobserved regions on \mathcal{S}_{\text{mesh}} .
+Each viewpoint is parameterized by the same five DoF as in Sec. 3 Problem Statement , \mathbf{vp}=\{p_{x},p_{y},p_{z},\theta,\phi\} .
+We first construct a dense pool of viewpoint candidates.
+For each unobserved vertex on \mathcal{S}_{\text{mesh}} , we compute its normal and sample two candidates by translating the vertex along the normal in both directions by a user-defined distance.
+Using the fast safety evaluation described above, we discard any candidate that lies inside \mathcal{S}_{\text{mesh}} or violates safety, and retain the remaining ones as feasible viewpoints.
+This dense set is then pruned using a gravitation-like model that merges viewpoints that cover fewer regions into those covering more.
+We sort all candidates by their visible vertex counts vc_{i} in descending order.
+Processing them in this order, for each viewpoint i we collect its neighbors \mathcal{V}_{\text{N}} within a given radius, and then update its position according to a coverage-weighted “gravitational” pull:
+
+\mathbf{p}_{i}\leftarrow\mathbf{p}_{i}+\sum\limits_{\mathbf{p}_{n}\in\mathcal{V}_{\text{N}}}\frac{vc_{n}}{vc_{i}}(\mathbf{p}_{n}-\mathbf{p}_{i}),\,\text{s.t.}\,vc_{n}<vc_{i}. (20)
+
+Pitch and yaw are updated in the same way.
+All neighbors in \mathcal{V}_{\text{N}} are then removed from the candidate set.
+We repeat the above procedure until all unobserved surface regions on \mathcal{S}_{\text{mesh}} are covered, and the remaining viewpoints constitute the minimal set \mathcal{V}_{\text{G}} .
+
+Figure 9: Illustration of skeleton-based space decomposition in castle gate. (A) Input mesh and extracted skeleton, (B) Space decomposition using the skeleton.
+
+As discussed above, directly determining the optimal visiting order of \mathcal{V}_{\text{G}} is computationally expensive due to its NP-hard nature, especially for large-scale target structures.
+To make the problem tractable, we adopt a two-level decomposition strategy that splits the original problem into smaller, efficiently solvable sub-problems.
+
+First, we extract a 3D skeleton from the previously computed inliers to capture the topology of \mathcal{S}_{\text{mesh}} (Fig. 9 A).
+Based on this skeleton, the target mesh is decomposed into multiple independent subspaces characterized by simple geometry (Fig. 9 B), following our prior work ( Feng et al. 2024 ).
+Each viewpoint in \mathcal{V}_{\text{G}} is then assigned to its nearest subspace according to Euclidean distance, yielding a set of disjoint viewpoint groups.
+Unlike our previous approach, which plans directly within each subspace, we further refine this grouping to balance computational load.
+Specifically, for any subspace whose viewpoint group spans a radius larger than a predefined threshold R_{\text{g}} , we construct a visibility graph where edges connect pairs of viewpoints with unobstructed line-of-sight ( i.e. , no occlusion by \mathcal{S}_{\text{mesh}} ).
+The viewpoints are then partitioned into approximately uniform, inter-visible convex groups, each with radius below R_{\text{g}} .
+This decomposition reduces the original route planning problem into two Asymmetric Traveling Salesperson Problems (ATSPs): (1) optimizing the group sequence; (2) finding the optimal traversal order of viewpoints within each group.
+Both problems are solved using a mature ATSP solver ( Helsgaun 2000 ) and can be processed in parallel across groups.
+
+This two-level strategy offers two key advantages: (1) it significantly reduces problem dimensionality and enables inherent parallelization ( e.g. , decomposing a single 100\times 100 problem to four parallel 25\times 25 problems). (2) Group convexity obviates the need for collision checks among intra-group viewpoints.
+While not guaranteeing strict global optimality, it empirically achieves a favorable balance between computational efficiency and path quality.
+
+Figure 10: Illustration of consistency-promoting designs in global planning: (A) Reuse prior viewpoints for stable coverage across cycles; (B) Match prior groups to yield a temporally coherent global sequence.
+Shown in 2D for clarity.
+
+As previously emphasized, the global path \mathbf{P}_{\text{G}} should also align with historical flight.
+Thus, we integrate simple yet effective consistency-promoting designs into each step of the global planning process, as shown in Fig. 10 .
+First, for unobserved regions whose geometry remains unchanged since the last planning cycle, we preferentially reuse viewpoints from the previous set to minimize temporal variations in the viewpoint distribution (Fig. 10 A).
+Before current viewpoint generation, we evaluate viewpoint reuse by comparing past and current observations:
+
+\text{ReuseVP}(\mathbf{vp})=\left\{\begin{array}[]{rcl}\text{True},&&{\text{CD}_{\text{u}}(\mathcal{O}^{\text{last}}_{\mathbf{vp}},\mathcal{O}^{\text{cur}}_{\mathbf{vp}})<\sigma}\\
+\text{False},&&{\text{else}}\end{array}\right. (21)
+
+where \sigma is the maximum of the average edge lengths of the previous and current meshes; \mathcal{O}^{\text{last}}_{\mathbf{vp}} and \mathcal{O}^{\text{cur}}_{\mathbf{vp}} are the last and current observations for viewpoint \mathbf{vp} .
+
+Algorithm 2 Consistency-aware Global Coverage Planning
+
+Second, to bolster temporal consistency in viewpoint clustering, group centroids from the preceding iteration serve as initial seeds for the current clustering.
+Third, to avoid erratic flight from unstable group visiting sequences, a matching step (Fig. 10 B) is added before invoking the ATSP solver: we align the first m groups from the historical sequence with current clustering results, via:
+
+\mathop{\arg\min}_{g^{\text{cur}}\in\mathcal{G}_{\mathcal{V}}^{\text{cur}}}\text{CD}_{\text{d}}(g^{\text{last}},g^{\text{cur}}), (22)
+
+where \mathcal{G}_{\mathcal{V}}^{\text{cur}} is the current cycle’s groups, and g^{\text{last}} is a group from the previous sequence.
+This matching is done sequentially for each of the first m historical groups; once matched, the current group is removed from \mathcal{G}_{\mathcal{V}}^{\text{cur}} to prevent duplicate assignments.
+Collectively, as summarized in Algo. 2 , the global planner integrates these careful designs to yield a temporally consistent global path \mathbf{P}_{\text{G}} with complete coverage, ready for the local planner to access.
+Sec. Consistency-aware global planning. demonstrates the efficiency improvement contributed by consistency-aware designs.
+
+5.3.3 Viewpoint-constrained Trajectory Optimization
+
+For simultaneous optimization of spatial configuration and temporal allocation, the local trajectory \mathbf{x}_{\text{L}}(t) is parameterized via a differentiable piecewise polynomial class, MINCO ( Wang et al. 2022 ):
+
+\mathbf{x}_{\text{L}}(t)=\left\{z_{i}(t)=\mathbf{c}_{i}^{\mathsf{T}}\psi(t)\in\mathbb{R}^{5},t\in[0,T_{i}]|i=1,\dots,K\right\}, (23)
+
+\mathbf{c}_{i}\in\mathbb{R}^{(2s-1)\times 5},\psi(t)=\left[1,t,t^{2},\dots,t^{2s-1}\right]^{\mathsf{T}}, (24)
+
+where the trajectory comprises K polynomial pieces.
+The coefficients matrix \mathbf{c}_{i} and temporal basis function \psi(t) depend on the polynomial degree d .
+MINCO reformulates \mathbf{c}_{i} via a differentiable mapping \mathcal{M}(\cdot) using intermediate points \mathbf{Q}=\left\{\mathbf{q}_{i}\in\mathbb{R}^{5}|i=0,1,\dots,K\right\} (on the refined \mathbf{P}_{\text{L}} ) and time profiles \mathbf{T}=\left\{T_{i}|i=1,\dots,K\right\} :
+
+\mathbf{c}_{i}=\mathcal{M}(\mathbf{q}_{i},T_{i}). (25)
+
+This enables efficient spatio-temporal trajectory deformation by manipulating \mathbf{Q} and \mathbf{T} , highly advantageous for gradient-based optimization.
+For brevity, we split \mathcal{M}(\cdot) into positional ( \mathcal{M}^{\text{pos}}\in\mathbb{R}^{(2s-1)\times 3} ) and orientational ( \mathcal{M}^{\text{ori}}\in\mathbb{R}^{(2s-1)\times 2} ) components:
+
+\mathbf{c}_{i}=\mathcal{M}^{\text{pos}}(\mathbf{q}_{i},T_{i})\oplus\mathcal{M}^{\text{ori}}(\mathbf{q}_{i},T_{i}), (26)
+
+z_{i}^{\text{pos}}(t)=\mathcal{M}^{\text{pos}}(\mathbf{q}_{i},T_{i})\psi(t),z_{i}^{\text{ori}}(t)=\mathcal{M}^{\text{ori}}(\mathbf{q}_{i},T_{i})\psi(t), (27)
+
+generating coefficients for 3D position and orientation ( i.e. , pitch and yaw angles), respectively.
+
+We then formulate the trajectory optimization problem as:
+
+\displaystyle\mathop{\min}_{\mathbf{Q},\mathbf{T}}\;\; \displaystyle\sum_{i=1}^{K}\int_{0}^{T_{i}}\|(z_{i}^{\text{pos}}(t))^{(d)}\|_{2}^{2}\,dt+w_{\text{t}}T_{i}, (28a) s.t. \displaystyle-T_{i}<0,\;-\Phi(z_{i}^{\text{pos}}(t))<0, (28b) \displaystyle g_{\text{dyn}}(z_{i}^{\text{pos}}(t),z_{i}^{\text{ori}}(t))<0, (28c) \displaystyle C(\mathbf{x}_{\text{L}}(t))-C(\mathbf{P}_{\text{L}})=0. (28d)
+
+The integral term promotes smoothness via the squared d -th derivative of position, and w_{\text{t}}T_{i} penalizes total duration with weight w_{\text{t}} .
+The inequality constraints ensure positive time allocation, collision avoidance (positive ESDF values \Phi(\cdot) ), and dynamic feasibility (bounded velocity, acceleration, jerk, and angular velocity).
+Eq. ( 28d ) encodes coverage: ideally, the executed trajectory \mathbf{x}_{\text{L}}(t) should achieve the same target coverage as the input path \mathbf{P}_{\text{L}} .
+However, the coverage functional C(\cdot) is a global, non-differentiable visibility measure, and enforcing ( 28d ) directly would lead to a highly non-convex mixed-integer problem, unsuitable for real-time optimization.
+Fortunately, by construction of the global coverage path, full coverage over the current horizon is achieved precisely by aggregating observations from all viewpoints embedded in \mathbf{P}_{\text{L}} .
+This allows us to replace the abstract coverage constraint ( 28d ) with a concrete geometric requirement: the optimized trajectory must traverse every viewpoint in \mathbf{P}_{\text{L}} .
+Since \mathbf{P}_{\text{L}} includes both viewpoints and waypoints, we decompose \mathbf{Q} into W optimizable waypoints ( \mathbf{Q}_{\text{{w}}}\in\mathbb{R}^{W\times 5} ) and G fixed viewpoints ( \mathbf{Q}_{\text{{v}}}\in\mathbb{R}^{G\times 5} ). \mathbf{Q} is constructed using binary selection matrices \mathbf{S}_{\text{{w}}} and \mathbf{S}_{\text{{v}}} :
+
+\mathbf{Q}=\mathbf{S}_{\text{{w}}}\mathbf{Q}_{\text{{w}}}+\mathbf{S}_{\text{{v}}}\mathbf{Q}_{\text{{v}}}\in\mathbb{R}^{(W+G)\times 5}, (29)
+
+where \mathbf{S}_{\text{{w}}} and \mathbf{S}_{\text{{v}}} satisfy Kronecker Delta Function \delta_{i,\text{idx}(i)} ( \text{idx}(\cdot) denotes the index of a point (waypoint or viewpoint) on the local path).
+This ensures \mathbf{x}_{\text{L}}(t) passes through fixed viewpoints while optimizing via waypoints.
+To ensure strictly positive T_{i} without explicit inequality constraints, we introduce unconstrained virtual variables \mathcal{T}=\{\tau_{i}\} and map them to T_{i} through a smooth diffeomorphism \Theta(\cdot) :
+
+T_{i}=\Theta(\tau_{i})=\begin{cases}1+\tau_{i}+\dfrac{\tau_{i}^{2}}{2},&\tau_{i}\geq 0,\\[4.0pt]
+\dfrac{2}{2-2\tau_{i}+\tau_{i}^{2}},&\tau_{i}<0,\end{cases} (30)
+
+which yields T_{i}>0 for all \tau_{i}\in\mathbb{R} .
+
+Finally, we convert the inequality constraints to soft penalties by Smooth L1 loss terms and obtain an unconstrained objective:
+
+\mathop{\min}_{\mathbf{Q}_{\text{w}},\mathcal{T}}\mathcal{J}_{\text{s}}+w_{\text{t}}\mathcal{J}_{\text{t}}+w_{\text{d}}\mathcal{J}_{\text{d}}+w_{\text{c}}\mathcal{J}_{\text{c}}+w_{\text{sc}}\mathrm{Cov}(\mathbf{Q}_{\text{w}})+w_{\text{tc}}\mathrm{Cov}(\mathcal{T}). (31)
+
+Here, \mathcal{J}_{\text{s}} corresponds to the smoothness objective and \mathcal{J}_{\text{t}} penalizes total flight time, while \mathcal{J}_{\text{d}} and \mathcal{J}_{\text{c}} are Smooth L1 penalties that softly enforce dynamic feasibility and collision avoidance.
+The covariance regularizers \mathrm{Cov}(\mathbf{Q}_{\text{w}}) and \mathrm{Cov}(\mathcal{T}) discourage spatially oscillatory control points and highly uneven time allocation across segments, improving numerical stability.
+The positive scalars w are weighting coefficients that balance these terms.
+We subsequently solve this unconstrained problem efficiently to produce the desired \mathbf{x}_{\text{L}}(t) by employing a gradient-based approach, notably the L-BFGS algorithm ( Liu and Nocedal 1989 ).
+
+6 Implementation Details
+
+6.0.1 Perception
+
+We use the official small version of SAM2 as the segmentation FM to meet real-time requirements ( \sim 2 Hz), and set the sliding-window memory bank capacity to W_{m}=30 .
+In cross-modal refinement, W_{s}=7 keyframes are kept for memory attention and the reinitialization threshold is set to \kappa_{\text{reinit}}=0.7 .
+For 3D mapping, we refer to an efficient volumetric method ( Han et al. 2019 ) with a voxel resolution of 0.1 m and 10 -Hz update.
+
+Figure 11: A representative sample of the diverse, high-fidelity 3D assets used for multi-modal surface predictor training.
+
+6.0.2 Prediction
+
+For the main predictor, the geometric input and output are fixed to N_{i}=2048 and N_{o}=2048 points, respectively.
+The DINO image encoder produces K=324 patch tokens per view, and
+feature dimensions are set to D_{\text{t}}=768 , D_{\mathcal{I}}=768 , and D_{\mathcal{P}}=512 .
+All modalities are projected to a shared fusion space of
+dimension D_{\text{f}}=512 .
+In the fusion stage, we stack L=10 alternating-attention layers as described.
+The training dataset is constructed from a diverse collection of approximately 70,000 high-fidelity distinct 3D models, including a curated subset of Objaverse ( Deitke et al. 2023 ) and a small number of additional real-world scans from the Internet.
+Fig. 11 showcases a representative sample of these models, illustrating the dataset’s broad coverage of object categories and scales.
+Each asset is processed by our automatic multi-modal pipeline to produce aligned tuples as training samples.
+We implement the predictor in PyTorch and train on a server with eight NVIDIA RTX4090 GPUs, dual Intel Xeon CPUs, and 512 GB RAM.
+We use Distributed Data Parallel with a per-GPU batch size of 42 (effective batch size 336 ), automatic mixed precision, and activation checkpointing to improve throughput and reduce memory usage.
+The model is trained for 50 epochs (about 72 hours) using AdamW with an initial learning rate of 1\times 10^{-4} and weight decay of 1\times 10^{-4} .
+A cosine-annealing-with-warm-restarts scheduler restarts every epoch and decays the learning rate to a minimum of 1\times 10^{-5} .
+In inference-time geometry densification, we use Snowflake Point Deconvolution in SnowflakeNet ( Xiang et al. 2021 ) as the base upsampling architecture, with upsampling factor k=10 and resolution threshold \rho_{\text{min}}=0.5 m in all experiments.
+These upsamplers share the same training settings as the predictor but are trained for fewer epochs.
+
+6.0.3 Planning
+
+For the hierarchical planner, the global and local layers run in separate threads with r_{\text{G}}=1 Hz and r_{\text{L}}=20 Hz, respectively.
+In global planning, the viewpoint grouping radius is R_{\text{g}}=8 m and we match the first m=2 groups in the historical sequence when performing sequence alignment.
+The local planning horizon is set to H=10 m along the current global path and the MINCO parameterization uses d=4 ( i.e. , snap) with one polynomial segment per edge of the A*-refined \mathbf{P}_{\text{L}} .
+The penalty weights in Eq. ( 31 ) are chosen as w_{\text{t}}=60.0 , w_{\text{d}}=500.0 , w_{\text{c}}=500.0 , w_{\text{sc}}=60.0 , and w_{\text{tc}}=80.0 , which we empirically found to give a good trade-off among smoothness, flight time, dynamic feasibility, and safety.
+Optimization is solved with a maximum of 100 iterations and a gradient tolerance of 10^{-5} .
+
+7 Experiments
+
+In this section, we present a comprehensive evaluation of F ly C o in both real-world and simulated settings.
+Our experiments are organized to answer three complementary questions:
+
+Practicality: Can the system reliably and precisely execute fully autonomous, prompt-grounded target structure scanning missions in diverse in-the-wild environments under real sensing, computation, and constraints?
+
+Performance: Under fair conditions, how does F ly C o compare with representative SOTA paradigms in terms of efficiency, data integrity, safety, run-to-run stability, and required human priors?
+
+Attribution: Which components and design choices in perception, prediction, and planning account for improvements in overall system performance?
+
+We address the first question through extensive field deployments in Sec. 7.1 Real-world Experiments .
+Afterwards, Sec. 7.2 Comparisons with State-of-the-Art Methods demonstrates that F ly C o represents a more advanced system architecture, achieving a superior efficiency-completeness trade-off with high reliability while requiring substantially lower-effort human priors.
+Lastly, thorough ablation experiments in Sec. 7.3 Ablation Studies confirm the individual contributions of each key module and design in our system.
+
+Figure 12: Hardware platform and communication setup for real-world flights.
+
+7.1 Real-world Experiments
+
+Here we aim to substantiate that F ly C o effectively leverages FMs to enable drones autonomously and accurately scan human-specified 3D structures in diverse open-world environments, relying only on intuitive, low-effort human prompts.
+We present three proof-of-concept yet challenging experiments—conducted across four diverse in-the-wild sites—that demonstrate precise scene understanding, high efficiency, real-time safety, and reliable adaptability.
+In all trials, our system accomplished the missions in a single attempt without re-flights or additional operator intervention, despite receiving only high-level human inputs, underscoring its practical viability and real-world applicability.
+The rest of this part first describes the hardware platform and experimental setup, then details the three representative scanning experiments, and finally profiles the real-time performance and computational load of each module.
+
+Figure 13: Precise scene understanding for adaptive scanning.
+(A) The target structure of human interest: an arch bridge spanning between two large buildings.
+(B) Human-inputted visual and textual prompts for target specification.
+(C) Left \rightarrow right: precise visual/geometric target segmentation and reasonable surface prediction at three timestamps, even under the challenges of similar texture and spatial connection.
+(D) Demonstration of adaptively completing the scanning mission solely around the target and three corresponding real-world snapshots of this scanning flight shown in D(1-3).
+(E) Targeted 3D reconstruction with fine-grained details focusing only on the human-specified arch bridge.
+
+7.1.1 Hardware Platform and Experimental Setup
+
+As the drone shown in Fig. 12 , the aerial platform of F ly C o is modified from a DJI M30 quadcopter ( DJI 2025a ).
+Following our customization, it possesses a takeoff weight of 4.5 kg, a 668 mm wheelbase, and a 0.55 m radius.
+For sensing, we equip this drone with a Livox Mid360 3D LiDAR ( Livox 2025 ) and a DJI gimbal-mounted camera.
+The former provides a maximum sensing range of 70 m and a point acquisition rate of 200,000 Hz for dense geometric scanning.
+Its integrated inertial measurement unit (IMU) provides 50 Hz updates, which are crucial for accurate localization and mapping.
+Concurrently, the latter captures 1920\times 1080 resolution RGB images at 30 frames per second and supports a pitch rotation range from +45\,^{\circ} to -100\,^{\circ} , crucial for flexible textural details capture.
+Onboard computation is handled by an NVIDIA Jetson Orin NX ( NVIDIA 2025 ) that includes an Ampere GPU and an Arm Cortex-A78AE v8.2 64-bit CPU.
+Remaining structural and electronic components adhere to a lightweight and compact design principle, collectively contributing to a flight endurance of approximately 24 minutes on a single charge.
+In addition, a personal laptop, featuring an Intel 24-core 5.4-GHz i9-13900HX CPU and an NVIDIA RTX4060 GPU, serves as the ground station, offering an intuitive interface for specifying user prompts and visualizing the flight in real-time.
+Since the prediction module is computationally intensive for the edge device but not strictly latency-critical (empirically below 1 s is acceptable), it is executed on this laptop, while all other modules run on the onboard computer.
+Communication between onboard and ground devices is maintained through a 4G cellular network, augmented by data compression techniques to ensure real-time and stable data transmission.
+
+The maximum speed and gimbal angular speed of the drone are limited to 1.0 m/s and 20 ∘ /s, respectively, to balance perception quality and flight efficiency.
+No prior site information or pre-built environmental maps about the experimental scenarios are provided to the drone.
+The only human input is a one-sentence textual description together with sparse visual annotations at the start of each mission, where no manual intervention is allowed during flight.
+
+7.1.2 Precise Scene Understanding for Adaptive Scanning
+
+We first validate our system’s ability to reliably understand the physical world, a capability enabled by foundation models and fundamental to translating abstract user prompts into accurate drone scanning actions.
+A key aspect of this understanding mirrors human perception: humans not only identify discrete structures but effortlessly recognize key parts ( e.g. a house’s front door or a teacup’s handle) ( Hoffman and Richards 1984 ; Biederman 1987 ), focusing on these meaningful components.
+This “part attention” demands more nuanced scene understanding—including fine-grained part-whole relationships—than recognizing standalone structures.
+Consequently, adapting to scan specific parts of a larger structure is far more challenging than scanning entire ones, particularly when the target is visually interconnected with its surroundings.
+This raises a critical question: Can drones develop precise scene understanding to adaptively scan user-specified targets, even when they are integral parts of larger, interconnected entities?
+To answer this, we performed a real-world experiment in which the system was instructed to scan a distinctive arch bridge connecting large buildings on both sides (target highlighted in yellow, Fig. 13 A).
+
+With our system, the user was only required to pick the target arch bridge by two simple steps: first, drawing a rough bounding box around the desired region in the camera feed; second, providing a simple text description that explicitly mentions the arch bridge (Fig. 13 B).
+Even though the inputs were not very precise, and the bridge looked visually similar to the nearby walls, our system still successfully segmented the target structure in the 2D image (Fig. 13 C, first two columns).
+This achievement derives from the fusion of visual and textual understanding of the target from FMs: these modalities together established a reliable semantic reference, effectively clearing up ambiguities caused by imprecise user inputs and visual similarity.
+Next, this detailed 2D segmentation helped accurately split the 3D point cloud using projective geometry.
+This step cleanly and stably separated the bridge from the connected buildings it attached to, despite their physical adjacency (Fig. 13 C, middle two columns).
+Crucially, boosted by 2D-3D cross-modal refinement, our perception module effectively transfers the world understanding of FMs into 3D space, enabling the drone to continuously track the target bridge throughout the flight, even as the drone’s viewpoint shifted dynamically (Fig. 13 C).
+This process of linking the user’s request to the real-world target stayed stable and consistent throughout the entire mission.
+
+Drawing on these accurate perception results, our predictor inferred the complete surface of the arch bridge, even when some of its pillars were occluded from view by others (Fig. 13 C, right column).
+An initial deviation in the height estimation of the upper walkway was progressively reduced as the drone collected more observations during flight.
+Building on this precise scene understanding and predictive foresight, the planner then generated adaptive, target-centric scanning paths that compactly encircled the bridge, precluding time waste on non-target regions (Fig. 13 D).
+During flight, it adapted trajectories in real-time to safely avoid obstacles—for instance, navigating between bridge pillars, bypassing nearby walls and buildings—while simultaneously ensuring efficient, comprehensive coverage of the specified target structure.
+
+Once completing its missions, the drone transmitted all visual and geometric data it had scanned from the arch bridge to the user.
+This raw data was subsequently processed with RealityScan ( Epic 2025 ) to reconstruct a high-fidelity, metrically accurate 3D model, even for such a complex structure (Fig. 13 E).
+The final deliverables to the user included both the raw data and the reconstructed model.
+A full recording of this experiment is provided in Extension 2.
+
+7.1.3 Robust Scanning for Large-scale Structures
+
+Figure 14: Robust scanning for large-scale structures.
+(A) Bird’s-eye view of the experiment site—large-scale concert hall (100 m \times 60 m \times 35 m) and the textual description entered by the user.
+(B) Information completeness curve over time. The plot compares practical observations (green) against model predictions (red). The prediction model’s positive information gain exhibits its effectiveness in providing foresight guidance for planning.
+(C) The predicted geometry tightly aligns with partial observations and progressively converges towards the actual shape.
+(D) The velocity profile of this large-scale mission.
+(E) The scanning flight trajectory (red) around the concert hall. The rainbow-colored surface represents the geometric segmentation results. (E(1-2)) Two close-up views from the trajectory at key locations.
+(F) Distribution of trajectory generation latencies during the mission.
+(G) A resulting high-quality, photorealistic 3D model reconstructed after this autonomous scanning flight.
+
+In our system, knowledge embedded in FMs is leveraged for the generalizable prediction of the target surface, forming a pivotal bridge between perception and planning.
+This prediction, built on scene understanding, infers the target’s complete 3D geometry to inform efficient, safe scanning paths.
+However, operating in large-scale environments markedly challenges this module: due to limited sensor range, only a small portion of the target is visible at the beginning of the mission, and even later observations remain sparse relative to the overall structure.
+This impairs accurate, consistent surface prediction over time.
+When prediction becomes unreliable, the foresight guidance for aerial robots is compromised, leading to back-and-forth movements that waste more time or even dangerous flight paths.
+By distilling world knowledge from FMs, F ly C o strengthens spatial reasoning across diverse scenarios, thereby enabling generalizable 3D structure predictions (detailed quantitative evaluations are presented in Sec. Zero-shot surface prediction comparisons. ).
+This capability allows the drone to maintain robust predictions, overcoming the challenges posed by limited observations in large-scale scenes.
+To demonstrate this robustness in practice, we deployed our system at a 100 m \times 60 m \times 35 m concert hall surrounded by hills and lakes (see Fig. 14 and Extension 3).
+The mission covered 1028.92 m in 1042.4 s (Fig. 14 D), which, to the best of our knowledge, is the first demonstration of a continuous autonomous flight exceeding 1000 m for 3D target structure scanning in the wild.
+
+‘Information completeness’ in Fig. 14 B measures the proximity to the complete surface of the concert hall over time.
+The two curves show that throughout the flight, the prediction module consistently provided more useful information compared to the direct observations from the drone.
+Notably, early on ( t_{1} ), even though only about 35\% of the target was initially observed, our predictor correctly recovered the concert hall’s overall shape and key structural features.
+It maintained a decent shape completeness of around 63\% and significantly increased the available information by about 28\% .
+Such robustness stems from the model’s ability to leverage global contextual information embedded in the user’s text description (“ a circular structure with a domed roof ”), which compensates for the scarcity of initial visual and geometric inputs.
+Fundamentally, this reflects that the predictor inherits generalizable knowledge from FMs, enabling it to generate reasonable structural predictions even with limited other modalities data.
+As the drone collected more observations, the model kept steadily improving its inference, becoming less uncertain over time and gradually converging on the correct shape (Fig. 14 B, C).
+
+Guided by these robust predictions, the scanning trajectory was notable for being smooth and coherent, with no frequent direction changes, unnecessary detours, or repeated visits to areas that had already been scanned (Fig. 14 E).
+This well-organized path led to strong flight efficiency.
+The system also performed well in terms of computational efficiency in trajectory generation.
+Over 138 planning cycles, the average time to generate each trajectory was only 32 ms, with a standard deviation of 6.3 ms (Fig. 14 F).
+This computational performance allowed the system could respond quickly even in large-scale scenarios.
+As a result, despite mild prediction inaccuracies early in the mission (such as at t_{1} and t_{2} ), our planner maintained high adaptability to address discrepancies between predictions and reality in a timely manner.
+
+7.1.4 Efficient and Safety-assured Scanning within Clutters
+
+Figure 15: Efficient and Safety-assured Scanning within Clutters.
+(A,D) Low-effort user prompts (text + sparse clicks) specifying the target castle gate and red-brick building .
+(B) Castle-gate mission: (left \rightarrow right) visual target segmentation, predicted complete surface, representative static obstacles and dynamic elements ( e.g. , thin wires, pedestrians, adjacent structures, woods), and the corresponding 3D target segmentation (rainbow-colored) with executed trajectory.
+(C,K) High-fidelity reconstructions from the scanned data for the two missions.
+(E) Red-brick building site overview.
+(F) Specification of the drone, detailing a radius of 0.55 m.
+(G) Red-brick building: prompt-grounded segmentation and online surface predictions consistent with partial observations.
+(H) Minimum obstacle distance over time; the collision threshold equals the drone radius (red dashed line), remaining satisfied throughout the flight.
+(I(1-3)) Snapshots of key flight moments, demonstrating safe navigation through cluttered spaces ( e.g. , a 2.5 m gap near walls and vegetation).
+(J) Complete flight result surrounding the red-brick building.
+
+Generating targeted drone actions to scan human-intended structures—grounded in precise scene understanding—is the final yet critical step in our system.
+In unknown open-world environments, drones must not only efficiently conduct comprehensive scanning of user-specified structures but also handle unexpected dense obstacles and dynamic elements ( e.g. , pedestrians).
+Therefore, how to simultaneously achieve both objectives emerges as a key challenge, which we addressed by the seamless integration of scene knowledge and flight skills—coordinating FMs with a hierarchical planner.
+In this experiment, we tested our system in complex environments to validate the effectiveness of this approach (Fig. 15 ).
+The drone was tasked with scanning two targets in detail according to textual and visual prompts from the user (Fig. 15 A, D): a castle gate surrounded by park trees and a red-brick building in a dense forest.
+
+Table 1 : Average per-cycle computation time across four in-the-wild missions. Target extents indicate the length, width, and height of the minimal oriented bounding box.
+
+Real-world Scenarios Target Extents (m) Perception (ms) Prediction (ms) † Planning (ms) ‡ Arch bridge (large building) 8 \times 36 \times 12 402.6 149.3 + 432.5 266.3 || 28.3 Concert hall (campus) 100 \times 60 \times 35 397.7 151.4 + 709.8 457.7 || 32.0 Castle gate (driving school) 9 \times 35 \times 20 394.3 150.9 + 411.2 234.6 || 34.5 Red-brick building (forest) 13 \times 45 \times 16 398.2 148.1 + 540.6 309.2 || 35.7
+
+† Decomposed as t_{\text{pred}}+t_{\text{dense}} , where t_{\text{pred}} is the latency of the multi-modal surface prediction network and t_{\text{dense}} is the latency of inference-time geometry densification. ‡ Decomposed as t_{\text{global}}\,||\,t_{\text{local}} , where t_{\text{global}} is the latency of global coverage planning and t_{\text{local}} is the latency of the local trajectory planning.
+
+After interpreting the prompts, the perception module accurately segmented the user-intended castle gate and red-brick building within cluttered surroundings (Fig. 15 B and G).
+The red-brick building was challenging due to a nearby similar-looking structure (Fig. 15 E), but the system resolved this ambiguity using the user’s visual clicks and rectification from 3D modality, which clarified linguistic uncertainties.
+Beyond this, intricate features like undulating roofs, irregular spires, and non-convex features hindered precise surface prediction.
+Yet our multi-modal model inferred a qualitatively reasonable 3D target geometry consistent with inputs (Fig. 15 B and G).
+
+In terms of scanning flight performance (Fig. 15 B, J), the drone operated efficiently with a compact trajectory around the targets, avoiding time wasted on irrelevant areas, local detours, or hasty directional shifts with unclear intent.
+Meanwhile, it dynamically adjusted flight trajectories and sensor viewpoints to cover all critical regions of the targets, eliminating redundant scans.
+This efficiency arises from our decoupled system architecture: (1) it concretizes abstract scene knowledge (empowered by FMs) via the form of predicted surfaces; (2) it enables independent planning that fully leverages this guidance to generate global coverage paths with long-horizon temporal consistency.
+Ensuring real-time safety in these cluttered environments is equally non-trivial.
+The castle gate, as the entrance to a driving school, had frequent pedestrian and vehicle traffic; surrounding woodlands, small structures, and thin wires further constrained flight (Fig. 15 B).
+Within the forest, navigable space was limited to a narrow 2.5 -m passage—barely enough for the drone with a 1.1 -m diameter (Fig. 15 F and I).
+Despite these high-risk conditions, our planner maintained consistent safe clearance from all obstacles to avoid collisions.
+For the red-brick building mission specifically, Fig. 15 H tracks the drone’s minimum distance to obstacles over 500 seconds: this distance remained above the 0.55 -m collision threshold (red dotted line, based on the AV’s radius).
+This safety assurance is attributed to the asynchronous hierarchical design of our planner, which allows the local planner can react swiftly to environmental changes while adhering to the efficient, target-centric global paths.
+
+Taken together, in our system, FMs transform complex, unknown open-world scenes into deterministic structured knowledge, empowering the planner to easily generate precise 3D scanning trajectories of the user-intended structure, with both high efficiency and real-time safety.
+Complete video demonstrations of both missions can be found in Extension 4 and 5.
+
+7.1.5 Real-time Performance and Computational Profiling
+
+Tab. 1 summarizes the average per-update runtime of each module across the four real-world missions, measured over the full flight duration and expressed as wall-clock time per cycle for perception, prediction, and planning.
+
+On the onboard computer, the perception stack (SAM2-based segmentation with cross-modal refinement) runs at about 400 ms per update in all scenarios, corresponding to an effective rate of roughly 2 - 2.5 Hz.
+This shows that prompt-grounded 2D-3D target segmentation can be sustained at a stable real-time frequency even in large, cluttered outdoor environments.
+
+The prediction pipeline, executed on the ground station, has two stages: the multi-modal surface predictor and the inference-time densification module.
+The forward pass of the predictor is nearly constant at \sim 150 ms across all targets, as it depends only on the fixed input-output point-set sizes.
+In contrast, the densification cost naturally scales with physical target size, ranging from about 0.4 s for the arch bridge and castle gate to about 0.7 s for the concert hall.
+This is expected, since the cascade of upsampling networks stops adaptively once the desired spatial resolution is reached.
+Even in the largest scene, however, the overall prediction latency stays below 1 s and runs in its own low-rate thread, providing timely foresight without becoming a bottleneck for closed-loop flight.
+With the maximum speed capped at 1 m/s, this latency means that at most newly observed surface from 1 -m movement is missing from each prediction update, so the predicted geometry remains closely aligned with the latest observations rather than drifting far from reality and misguiding the planner.
+
+For planning, the advantages of the asynchronous hierarchical framework and computation-efficient designs are clearly reflected in the timing profile.
+Global coverage planning takes roughly 250 - 310 ms per cycle, with runtime increasing with target scale as it reasons over the full predicted mesh and the associated viewpoint set; nevertheless, this cost is only \sim 40\% of the prediction latency, allowing to comfortably keep pace with prediction updates.
+Conversely, the local planner maintains an almost constant runtime of about 28 - 36 ms per call across all missions, since its complexity depends on the fixed-horizon path segment rather than the overall scene scale.
+This separation enables high-rate trajectory replanning and rapid reactions to newly revealed obstacles, regardless of how large or complex the target structure is.
+
+Taken together, these results confirm that all components of F ly C o meet their intended real-time budgets: perception operates at a few hertz on the edge device, prediction delivers sub-second structural foresight on the ground station, and the global-local planner jointly preserves long-horizon efficiency and high-frequency safety.
+This demonstrates that our FM-empowered scanning system is not only accurate and robust, but also computationally practical for real-world deployment.
+
+Table 2 : Human prior inputs required by different paradigms. E(h) is the human effort measure defined in Sec. 3 Problem Statement .
+
+Methods Text Sparse 2D Anno. 3D BBox Manual 3D Segmentation Pre-defined 3D Flight Pattern E(h) Plan3D – – ✓ ✓ ✓ High Star-Searcher – – ✓ – – Medium Ours ✓ ✓ – – – Low
+
+From left to right, the prior inputs require increasing human effort (low \rightarrow high).
+
+7.2 Comparisons with State-of-the-Art Methods
+
+To complement the field demonstrations, we conduct systematic benchmark experiments in simulation to compare F ly C o against representative SOTA approaches from existing practical paradigms: ( two-stage and exploration-based ).
+From these experiments, our system achieves clearly superior performance in mission efficiency, information completeness, flight safety, and stability across runs.
+We first introduce the simulated environments and experimental protocol, followed by the baselines and quantitative metrics used for evaluation.
+We then report and analyze benchmark results, illustrating why F ly C o outperforms these alternative paradigms.
+
+Figure 16: Overview of the simulated environments used in our experiments: (A) Windmill , (B) Church , (C) Pagoda , and (D) Schloss .
+The target structures are outlined in yellow.
+
+7.2.1 Simulated Scenarios and Experimental Setup
+
+To enable rigorous, quantitative benchmark comparisons, we perform these tests in the physically realistic AirSim simulator ( MicrosoftResearch 2025 ) across four complex, previously unseen scenarios that mirror typical real-world inspection targets.
+Specifically, we consider: (1) a Windmill located in a rural, hilly landscape; (2) a Church situated in a cluttered European-style town; (3) a Pagoda standing at the center of a dense temple courtyard; and (4) a Schloss surrounded by varied terrain and vegetation (see Fig. 16 ).
+In all scenarios, a virtual drone is equipped with a 360\,^{\circ} LiDAR and a gimbal-mounted RGB camera, and is tasked with collecting both geometric and visual data of the designated target.
+The maximum translational speed is limited to 1 m/s and the gimbal’s maximum angular speed to 20\,^{\circ} /s, which is identical for all benchmarked approaches.
+For each method, we run 20 repeatable trials per scenario on the same desktop computer (Intel Core i7-13700KF CPU, 32 GB RAM, NVIDIA RTX4060 GPU) to ensure a fair computational comparison.
+
+Table 3 : Benchmark results in simulation. For each scenario, we report mean (Avg), standard deviation (Std), maximum (Max), and minimum (Min) over 20 trials. Extent is the target’s 3D size ( L_{x}\times L_{y}\times L_{z} ) in meters.
+
+Scenarios Extents (m) Methods Flight Time (s) \,\downarrow Info. Completeness (%) \,\uparrow Success Rate \,\uparrow Avg Std Max Min Avg Std Max Min Windmill 16 \times 30 \times 32 Plan3D ( Z_{1} ) 676.6 18.77 722.4 659.6 71.67 1.62 75.54 69.84 15/20 Plan3D ( Z_{2} ) 798.3 27.17 853.9 759.3 89.76 2.59 89.76 82.11 13/20 Star-Searcher ( Z_{1} ) 787.4 59.56 936.7 676.6 58.83 3.38 64.47 52.78 20/20 Star-Searcher ( Z_{2} ) 981.9 77.50 1167.0 823.5 84.30 3.60 89.49 73.67 20/20 Ours 329.4 8.93 357.9 321.4 96.04 0.58 97.11 94.88 20/20 Church 35 \times 17 \times 18 Plan3D ( Z_{1} ) 728.8 27.99 779.3 676.6 72.12 1.71 74.84 69.58 9/20 Plan3D ( Z_{2} ) 830.4 30.35 865.3 789.3 90.21 1.89 92.33 86.53 7/20 Star-Searcher ( Z_{1} ) 543.1 45.20 611.2 463.7 56.92 2.89 63.34 52.83 19/20 Star-Searcher ( Z_{2} ) 787.3 54.27 893.4 706.9 78.40 3.77 83.38 68.39 19/20 Ours 336.6 9.43 364.8 323.6 94.53 0.71 95.54 93.23 20/20 Pagoda 15 \times 15 \times 19 Plan3D ( Z_{1} ) 432.5 23.12 478.8 382.6 51.22 2.06 54.70 48.39 10/20 Plan3D ( Z_{2} ) 571.1 24.14 611.9 541.9 73.42 0.84 74.88 72.48 9/20 Star-Searcher ( Z_{1} ) 282.1 34.42 367.0 231.9 37.55 2.71 40.98 30.51 18/20 Star-Searcher ( Z_{2} ) 397.9 45.98 504.7 318.8 66.79 3.61 73.29 59.62 17/20 Ours 225.1 6.22 240.3 216.2 93.83 0.63 94.62 92.33 19/20 Schloss 22 \times 33 \times 20 Plan3D ( Z_{1} ) 756.7 32.29 804.3 701.6 73.13 1.97 77.58 70.13 18/20 Plan3D ( Z_{2} ) 981.4 21.36 1012.22 961.9 91.08 0.69 92.36 90.08 12/20 Star-Searcher ( Z_{1} ) 501.9 36.04 593.3 446.2 58.55 2.91 63.28 53.50 17/20 Star-Searcher ( Z_{2} ) 716.0 55.05 827.8 611.9 79.48 3.40 84.27 70.43 18/20 Ours 363.9 7.52 380.8 349.5 96.50 0.66 97.58 95.45 20/20
+
+Z_{1} and Z_{2} , respectively, represent the operation zones of different sizes specified by the user in the form of 3D bounding boxes.
+
+7.2.2 Baselines and Evaluation Metrics
+
+We benchmark F ly C o against two representative SOTA works, Plan3D ( Hepp et al. 2018 ) and Star-Searcher ( Luo et al. 2024 ), that instantiate the dominant paradigms for 3D target structure scanning: a two-stage pipeline and an exploration-based system.
+Plan3D follows a two-stage workflow: the drone first performs a coarse scan within a user-specified 3D bounding box; the user then manually segments the target, after which an offline coverage planner computes a refined close-range trajectory.
+Since no official implementation is available, we realize this paradigm by combining a Boustrophedon coverage planner ( Choset 2000 ) for the coarse path and FC-Planner ( Feng et al. 2024 ) for fine 3D coverage in the second stage.
+Star-Searcher represents exploration-based scanning methods for drones equipped with LiDAR and a camera.
+Given a user-defined 3D bounding box, it incrementally explores all occupied space in this volume using a frontier strategy, while simultaneously planning camera motions so that all discovered surfaces are visually inspected.
+We use the official implementation and align its sensor suite and motion limits with those of our system for a fair comparison.
+
+Notably, both Plan3D and Star-Searcher depend on user-specified 3D bounding boxes to define the operational zone, and Plan3D additionally needs manual target segmentation between its coarse and fine stages.
+To approximate a favourable yet realistic deployment for the baselines, we evaluate them under two bounding-box settings: a tighter box Z_{1} and a larger box Z_{2} .
+Even in the larger setting Z_{2} , we supply a near-ideal box that tightly encloses the target and take-off point while minimizing irrelevant volume, which substantially biases the comparison in favour of the baselines and thus yields conservative estimates of F ly C o’s advantage.
+
+Performance is evaluated along four complementary dimensions—efficiency, scanned data integrity, safety, and stability—using the following metrics. Flight time. Mission efficiency is measured by the total airborne time (in seconds) from takeoff to landing.
+We deliberately exclude any human setup time (such as bounding-box specification or manual segmentation), which effectively favors the baselines by ignoring their additional interaction overhead.
+Lower values indicate higher efficiency. Information completeness. Data integrity is quantified as the percentage of the ground-truth target surface that is successfully reconstructed.
+Both the reconstruction and ground-truth meshes are voxelized on a 0.05 m \times 0.05 m grid, and completeness is computed as the ratio of recalled occupied grid cells to the total number of occupied cells in the ground truth.
+Higher percentages indicate more complete coverage. Success rate. Safety and reliability are captured by the success rate, defined as the fraction of runs that finish without collision and within a pre-defined time budget T_{\max}=1500 s.
+For all methods, each trial terminates either when the algorithm declares completion (coverage saturated under its own stopping rule) or when the elapsed flight time exceeds T_{\max} ; both collisions and timeouts are counted as failures. Performance consistency. To assess stability across runs, we report the variability of flight time and information completeness over 20 trials per scenario, using standard deviation and the dispersion of their empirical distributions (visualized via violin plots in Fig. 17 ).
+Tighter distributions (smaller spread) correspond to more stable behavior across different runs.
+
+Figure 17: Violin plots of flight time (A) and information completeness (B) across four scenarios, comparing our system to SOTA baselines. Shapes show the density; embedded box plots mark the median, interquartile range, and whiskers at \pm 1.5 \times IQR.
+
+Figure 18: Benchmark visualizations across the four scenarios. Rows show flight trajectories and reconstructions from the scanned data for our method versus baselines, highlighting more complete coverage and improved efficiency achieved by F ly C o.
+
+7.2.3 Benchmark Results and Analysis
+
+We now present and analyze the benchmark results to quantify both the magnitude and the origin of F ly C o’s performance gains.
+Our discussion is organized around the four evaluation metrics—efficiency, data integrity, safety, and stability—and explicitly relates the observed outcomes to the objective formulated in Sec. 3 Problem Statement .
+The required human prior inputs of each paradigm are summarized in Tab. 2 .
+Quantitative results are reported in Tab. 3 , qualitative scanning trajectory and reconstruction visualizations are shown in Fig. 18 , and run-to-run variability is illustrated in Fig. 17 .
+Complete execution traces for all benchmark comparisons are provided in Extension 6.
+
+Tab. 3 and Fig. 17 jointly reveal that F ly C o achieves a consistent, scenario-wide advantage over both dominant paradigms, while requiring substantially lower-effort priors (Tab. 2 ).
+Across all four environments, F ly C o completes missions in 225 - 364 s on average, whereas the baselines mostly fall in the 400 - 1000 s range, depending on the paradigm and the bounding-box setting.
+Meanwhile, F ly C o maintains high information completeness of 93.8\% - 96.5\% , while Plan3D and Star-Searcher often exhibit markedly lower completeness.
+Importantly, these gains are accompanied by strong reliability: F ly C o succeeds in 79/80 trials overall (with 20/20 success in three scenarios), whereas both baselines incur non-negligible failure due to collisions or timeouts, particularly in larger or more cluttered environments.
+These trends map directly to the objective in Sec. 3 Problem Statement , which seeks to (1) minimize mission time, (2) maximize target information completeness, and (3) minimize human effort, subject to safety and feasibility constraints.
+On the efficiency-integrity frontier, F ly C o strictly dominates the baselines: it simultaneously reduces flight time by roughly 1.25\times to 3.0\times (depending on scenario) while often exceeding baselines by 4.3 - 56.2 percentage points in information completeness.
+Notably, this advantage is achieved even though we exclude all human interaction time from the flight-time metric, which biases the comparison in favor of the baselines.
+Beyond average performance, F ly C o also exhibits significantly greater stability.
+As visualized in Fig. 17 , the distributions of both flight time and information completeness are notably tighter for F ly C o, with minimal long tails and fewer outliers across all scenarios.
+Quantitatively, F ly C o achieves very small run-to-run variability in completeness (Std \leq 0.71 in all scenarios; Tab. 3 ) and similarly low variability in flight time, indicating stable closed-loop behavior rather than occasional highly inefficient runs.
+Regarding human effort, F ly C o reduces operator burden by relying only on a text prompt and sparse 2D annotations, rather than effortful low-level priors.
+Taken together, the benchmark results substantiate that F ly C o empirically achieves a strictly better efficiency-completeness trade-off while simultaneously reducing human effort and maintaining high reliability, rather than improving one objective at the expense of another.
+
+We next analyze the sources of F ly C o’s gains from a system-design perspective.
+Rather than attributing the improvements to individual algorithmic choices, we focus on how the FM-empowered perception-prediction-planning loop fundamentally reshapes the scanning process and resolves limitations inherent to existing paradigms.
+
+Perception: precise semantic grounding. The first source of improvement lies in perception.
+With FM-based grounding, F ly C o eliminates the need for explicit, low-level geometric intervention during operation.
+In two-stage systems, manual 3D segmentation is used to prevent spending flight time on irrelevant regions, but it externalizes part of the perception problem to humans, whose effort is non-negligible in real deployments.
+Exploration-based methods replace this step with a user-specified 3D bounding box; however, for non-convex and irregular targets, any box inevitably over-approximates the operational volume and introduces wasted traversal, most visibly in Windmill (Tab. 3 ).
+Crucially, even with near-ideal Z_{2} boxes that tightly enclose the target, both baselines still lag behind F ly C o in efficiency.
+Moreover, both baselines exhibit pronounced sensitivity to box specification: performance shifts substantially between Z_{1} and Z_{2} (Tab. 3 ), casting doubt on their practical viability.
+In contrast, FM-enabled perception anchors the scanning process directly to the semantic target throughout the mission.
+This tight coupling avoids irrelevant exploration by construction, leading to immediate gains in flight efficiency without relying on either manual intervention or geometric over-approximation.
+
+Prediction: continuous global structural foresight. The second and arguably most decisive advantage arises from prediction.
+Existing paradigms lack global context of the target’s complete structure during execution, whereas our shape inference exactly supplies this foresight.
+Two-stage pipelines attempt to recover global information via a pre-defined coarse scan, making the downstream close-range stage highly sensitive to what was observed in that first pass ( e.g. , omissions under Z_{1} ).
+Exploration-based methods face a more fundamental limitation: without any global structural knowledge, decisions are made purely based on local frontier information.
+This tends to produce discontinuous coverage with insufficient overlap, and ultimately poor reconstruction completeness, as reflected by the lower information completeness in Tab. 3 .
+By contrast, F ly C o maintains a continuously updated global prediction of the target structure, inferred from partial observations and refined online.
+This predictive capability provides foresight throughout the mission, allowing the system to proactively steer the drone towards yet-unobserved but structurally relevant regions.
+Thus, coverage is not only more complete but also more purposeful, explaining the consistently high information completeness achieved across all scenarios.
+
+Figure 19: Perception ablation on real-world flight data.
+(A) Vanilla SAM2: 2D target masks degrade and eventually collapse as viewpoint shifts.
+(B) Ours: 2D/3D grounding stays temporally stable throughout the flight.
+(C-D) 3D segmentation comparison: Vanilla SAM2 leaks irrelevant regions into the target structure.
+(E) GPU memory usage over time.
+
+Planning: efficient and safe scanning operation. Finally, the planning translates results of perception and prediction into concrete flight behavior.
+Prediction-guided global planning enables F ly C o to reason over the entire target structure while explicitly enforcing temporal consistency.
+This suppresses unnecessary revisits and redundant scans that are common in exploration-based strategies driven by purely local decisions, thereby directly improving efficiency and coherence (Fig. 18 ).
+Equally important is the asynchronous hierarchical design.
+Unlike serial two-stage pipelines, where planning and execution are tightly coupled and slow updates can delay reaction to newly observed obstacles, F ly C o decouples deliberative global planning from high-rate local replanning.
+This design preserves rapid responsiveness to environmental changes, which is critical in cluttered or large-scale environments.
+The higher success rates observed in complex scenarios such as Church and Pagoda (Tab. 3 ) can be directly attributed to this ability to reconcile long-horizon planning with real-time safety constraints.
+
+Overall, these results confirm that F ly C o’s advantages do not stem from isolated components, but from a coherent closed-loop system architecture empowered by FMs.
+This integration enables the system to reduce flight time, increase information completeness, and maintain efficient, safe operation without relying on fragile low-level priors or manual intervention.
+As such, the FM-empowered perception-prediction-planning loop represents a more appropriate and practical paradigm for open-world 3D target structure scanning than existing two-stage or exploration-based approaches.
+
+7.3 Ablation Studies
+
+Comprehensive ablation studies are carried out to disentangle the contributions of individual modules in F ly C o and to validate the design choices of the proposed perception-prediction-planning loop for effectively turning FM-guidance into reliable 3D target structure scanning behavior in the open world.
+We systematically remove or replace critical components to examine how each affects grounding robustness, structural foresight, flight efficiency and safety.
+These experiments clearly reveal how FMs features and advanced flight skills affect the system performance.
+Detailed results and discussion are presented below, with additional complete recordings and cases in Extension 6.
+
+7.3.1 Ablations on Perception
+
+This ablation study investigates whether off-the-shelf segmentation FMs can directly satisfy the perception requirements of open-world target structure scanning, and why a tailored perception design is necessary for reliable system-level operation.
+Unlike static image benchmarks, our task demands precise and temporally stable grounding of a user-specified target structure in both 2D and 3D throughout long-horizon flight under viewpoint changes, partial occlusions, and cluttered environments.
+
+We conduct a qualitative comparison using a real-world flight bag from a castle gate scanning mission, which contains raw sensor streams recorded during autonomous flight.
+We compare two approaches:
+(1) Vanilla SAM2 , which applies the original SAM2 for 2D segmentation and projects the masks onto the point cloud for 3D target extraction;
+and (2) F ly C o’s perception module, which incorporates cross-modal refinement for temporally consistent target grounding.
+Both methods receive the same one-time text prompt and sparse visual annotations at takeoff and run on the same onboard computer (NVIDIA Orin NX), with no further human input.
+We evaluate the two methods along four dimensions that are critical for system integration:
+(1) 2D segmentation temporal stability;
+(2) geometric accuracy of the derived 3D target structure;
+(3) perception latency; and
+(4) GPU memory consumption over time.
+Representative results are shown in Fig. 19 .
+
+Vanilla SAM2 initially produces plausible 2D segmentations, but its output becomes unstable as the viewpoint evolves (Fig. 19 A).
+At t_{4} , it already misses large portions of the target, and from t_{5} onwards, the model persistently outputs empty masks, causing a complete perception failure.
+This behavior highlights a fundamental limitation of directly applying frame-based segmentation models to long-horizon, streaming perception: without explicit temporal grounding and cross-modal correction, segmentation errors accumulate and eventually lead to failures.
+In contrast, our method maintains stable and accurate target grounding throughout the entire flight (Fig. 19 B).
+By continuously refining segmentation using geometric cues, the perception module dynamically corrects 2D errors and preserves temporal coherence.
+
+Even before outright failure, Vanilla SAM2 exhibits severe inconsistencies when lifted from 2D to 3D.
+As illustrated in Fig. 19 C-D, projecting 2D masks onto the point cloud often introduces surrounding trees, walls, or other obstacles into the target structure.
+This occurs because 2D segmentation alone cannot reason about spatial relationships or depth ordering, resulting in erroneous inclusion of geometrically unrelated regions.
+Our perception module explicitly enforces cross-modal consistency between image observations and partial geometry.
+As a result, the recognized 3D target remains clean and well-aligned with the true physical structure, avoiding the accumulation of incorrect segmentations.
+
+Beyond accuracy, perception must also be computationally sustainable for long-duration missions. Vanilla SAM2 exhibits steadily increasing GPU memory usage over time, which arises from memory mechanisms not designed for continuous streaming inputs (Fig. 19 E).
+This behavior makes it unsuitable for extended flights on resource-constrained onboard platforms.
+Conversely, our perception incorporates a memory bank optimized for streaming sensor processing, allowing stable and bounded GPU memory consumption throughout the mission.
+Moreover, the average perception latency is reduced by more than half, from approximately 800 ms with Vanilla SAM2 to around 400 ms with our method.
+This reduction enables real-time onboard operation without blocking the closed-loop flight.
+
+These results demonstrate that perception for open-world target structure scanning cannot be treated as a plug-and-play application of existing segmentation FMs.
+Accurate and reliable system behavior requires perception modules that explicitly account for temporal continuity, 2D-3D consistency, and computational efficiency.
+The proposed perception design fulfills these requirements, providing stable, accurate, and efficient target grounding that is essential for the downstream prediction and planning stages.
+
+7.3.2 Ablations on Prediction
+
+This part investigates the role and effectiveness of the proposed multi-modal surface predictor.
+We proceed from system-level impact to predictor-level design validation.
+First, we conduct an upper-bound analysis study, quantifying the contribution of predictive foresight to flight efficiency and coverage.
+We then assess the intrinsic quality of our predictor under zero-shot surface prediction benchmarks against SOTA models.
+Finally, we ablate key design choices (multi-modal conditioning, the alternating-attention fusion strategy, and partial-surface regularization) to understand their effects on prediction performance.
+Predictor-level evaluations are performed on the zero-shot Objaverse ( Deitke et al. 2023 ) and OmniObject3D ( Wu et al. 2023 ) datasets, comprising 10,000 objects and scenes entirely unseen during training.
+For a fair comparison, all methods are trained using the same protocol as our predictor with 2,048 output points, and both predicted and ground-truth shapes are normalized to the unit sphere during inference.
+We report L1 Chamfer Distance (L1-CD) for geometric fidelity and F-Score at a threshold of 0.001 for correspondence, and include inference latency where relevant.
+All experiments use the same computational platform as Sec. 7.2 Comparisons with State-of-the-Art Methods to ensure fair and consistent comparisons across variants.
+
+Table 4 : Ablation experiments for upper-bound analysis. For each scenario, we report average statistics over 20 trials.
+
+Variants Avg Flight Time (s) \,\downarrow Avg Info. Comp. (%) \,\uparrow W 1 C 2 P 3 S 4 W 1 C 2 P 3 S 4 GT 310.1 301.9 203.2 338.8 98.42 97.45 97.86 98.83 Ours 329.4 336.6 225.1 363.9 96.04 94.53 93.83 96.50
+
+1 Windmill , 2 Church , 3 Pagoda , 4 Schloss .
+
+Figure 20: Upper-bound analysis with privileged geometry. (A) GT-guided flight trajectory and resulting 3D reconstruction. (B) Our trajectory and reconstruction from the same mission.
+
+Figure 21: Qualitative comparison of surface prediction on four representative zero-shot test cases. For each row, the columns show (left \rightarrow right): (1) inputs, (2) predicted outputs from XMFNet, CRA-PCN, TripoSR, and our predictor, and (3) ground truth.
+
+We first probe a system-level question: Is our FM-empowered predictor informative enough to drive efficient and high-quality scanning behavior? To answer this, we replace the predicted surface used by the planner with the ground-truth target geometry, yielding a privileged-geometry variant (termed as GT ) that approximates the practical performance ceiling where complete structure is available throughout the mission.
+Following the experimental setup in Sec. 7.2 Comparisons with State-of-the-Art Methods , results in Tab. 4 show that our prediction helps close most of the gap to this ceiling.
+Compared with GT , our method proves remarkably competitive: only 20 - 35 s slower in all four sites, corresponding to a modest 6.2\% - 11.5\% increase in flight time.
+Fig. 20 further visualizes the scanning trajectory comparison in Church scenario.
+Meanwhile, the data integrity drop is small: F ly C o maintains 93.83\% - 96.50\% information completeness, staying within 2.4 - 4.0 percentage points of GT ’s near-perfect coverage.
+Although F ly C o never observes the full structure and receives no prior map, its multi-modal predictor provides sufficiently reliable global structural foresight to guide planning almost as if the full structure were available.
+The remaining gap to GT is expected, as it reflects the intrinsic advantage of having privileged geometry at all times, while the FM-empowered predictor already matches the majority of GT ’s system-level benefit.
+In other words, this upper-bound analysis experiment directly validates the powerful effectiveness of predictive capabilities in promoting open-world aerial scanning performance.
+
+Table 5 : Zero-shot surface prediction comparisons. We report averages on the zero-shot test set.
+
+Metrics XMFNet CRA-PCN TripoSR Ours Inf. Lat. (ms) \,\downarrow^{\dagger} 156.9 158.2 645.8 150.3 L1-CD \,\downarrow 37.393 31.053 44.831 28.037 F-Score \,\uparrow 0.601 0.639 0.569 0.705
+
+† Inference latency measured with a batch size of 1.
+
+The generalization of the predictive module is critical for bridging perception and planning in open-world applications.
+To evaluate our predictor’s zero-shot performance, we benchmark it against three representative SOTA models from 3D vision fields: CRA-PCN ( Rong et al. 2024 ) for point cloud completion, XMFNet ( Aiello et al. 2022 ) for cross-modal prediction, and TripoSR ( Tochilkin et al. 2024 ) for 3D generation.
+Since TripoSR cannot provide the metric scale, we align its output to the ground truth using ICP (rigid transform + scale) before evaluation.
+
+The quantitative results in Tab. 5 confirm that our predictor performs the best performance on both geometric fidelity (L1-CD) and correspondence (F-Score), while also being the fastest at inference.
+Compared to TripoSR, we achieve a remarkable 16.794 -point improvement in L1-CD and a 23.90\% increase in F-score.
+This significant margin highlights our method’s ability to address the limitations of off-the-shelf generative models when applied to physical-scale tasks.
+Against CRA-PCN, a point-cloud-only method, our predictor also surpasses the L1-CD by 3.018 and the F-Score by 10.32\% .
+This advantage stems from our effective utilization of multi-modal visual and textual information beyond geometry-only inference, which helps mitigate ill-posedness in geometry-unobserved or weakly constrained regions where outliers or noisy predictions are prone to emerge (Fig. 21 ).
+Even when compared to XMFNet, which also fuses cross-modal data, our approach maintains a clear lead, we outperform it by 9.356 in L1-CD and 17.31\% in F-score.
+The visualizations further reveal XMFNet’s unsatisfactory generalization on out-of-distribution cases, where it fails to infer complete geometries (Fig. 21 ).
+Moreover, our model also maintains the lowest single-sample latency ( 150.3 ms), supporting practical deployment in the closed-loop system.
+In summary, these findings demonstrate our predictor’s superior zero-shot generalization, which originates from its integration of world knowledge distilled from language and vision FMs.
+This ability empowers the proposed system to robustly handle diverse and novel open-world scenarios with high adaptability and low cost.
+
+Table 6 : Ablation experiments on key design choices of the predictor, reporting averages on the zero-shot test set.
+
+Variants Input Modalities Fusion Strategy Supervision L1-CD \,\downarrow F-Score \,\uparrow Image Cam. Param. Text Point Cloud \mathcal{L}_{\text{comp}} \mathcal{L}_{\text{par}} w/o Image ✗ ✓ ✓ ✓ Alternating Att. 1 ✓ ✓ 31.565 0.620 w/o Cam. Param. ✓ ✗ ✓ ✓ Alternating Att. 1 ✓ ✓ 30.747 0.636 w/o Text ✓ ✓ ✗ ✓ Alternating Att. 1 ✓ ✓ 29.553 0.673 Fusion-CA ✓ ✓ ✓ ✓ Cross-att. Only 2 ✓ ✓ 33.479 0.614 Fusion-GSA ✓ ✓ ✓ ✓ Gloal Self-att. 3 ✓ ✓ 32.628 0.621 w/o Partial Loss ✓ ✓ ✓ ✓ Alternating Att. 1 ✓ ✗ 30.578 0.637 Ours (Full Model) ✓ ✓ ✓ ✓ Alternating Att. 1 ✓ ✓ 28.037 0.705
+
+1 Alternating attention, 2 Cross-attention only, 3 Global self-attention.
+
+Figure 22: Qualitative prediction ablations. (A) Removing text inputs prevents leveraging global semantics. (B) Disabling partial-surface loss harms geometry consistency.
+
+In this experiment, we study whether prediction accuracy benefits from jointly conditioning on multi-modal inputs, beyond the basic partial geometric observations alone.
+To this end, we train three ablated alternatives, each omitting one key input: (1) image, (2) camera parameters, or (3) text.
+Our findings substantiate that the network effectively leverages each additional modality for a non-redundant positive gain (Tab. 6 ).
+Removing the image input leads to the largest drop, with the L1-CD increasing to 31.565 and the F-Score decreasing to 0.620 .
+In the absence of visual context, the model cannot refer to FM-derived visual priors and thus struggles to infer the correct surface geometry.
+Omitting camera parameters also hurts performance (L1-CD rising to 30.747 and the F-Score falling to 0.636 ), as it prevents the model from reliably aligning image evidence with 3D space, causing noisy or malformed predictions.
+The removal of text input degrades accuracy as well, with the L1-CD increasing to 29.553 and the F-Score decreasing to 0.673 .
+The qualitative results highlight the importance of this semantic guidance for high-level geometric control (Fig. 22 A).
+The textual prompt contains the crucial global structural descriptor “ L-shaped ”.
+Without this text, the model defaults to reasoning a simple linear geometry from the ambiguous partial point cloud.
+In contrast, thanks to the language FMs’ precise understanding of the text input, our predictor correctly infers the overall layout, matching the ground truth.
+Collectively, these ablations reveal that each modality provides unique and complementary information, critical for enabling generalizable surface predictions.
+
+We next examine how the fusion design affects the predictor’s ability to incorporate foundation-model knowledge.
+To isolate the contribution of our alternating-attention fusion, we construct two variants with identical trainable parameters: (1) Fusion-CA , which removes all self-attention and performs fusion purely via cross-attention, and (2) Fusion-GSA , which directly concatenates the encoded modality features and applies only global self-attention for mixing.
+Tab. 6 exhibits that both alternatives markedly underperform our full model, demonstrating that alternating attention is more advantageous.
+Concretely, Fusion-CA yields a large degradation (L1-CD 33.479 , F-Score 0.614 ), as removing self-attention limits cross-modal exchange to a single query-key-value interaction and weakens semantic alignment between vision and language priors before they are injected into the geometric stream.
+Thus, the cross-attention stage receives less mutually consistent FM priors, and the predicted surface becomes less accurate. Fusion-GSA performs even worse (L1-CD 32.628 , F-Score 0.621 ): while global self-attention permits unrestricted cross-modal mixing, it also blends modality information indiscriminately, injecting redundant or noisy context that is not necessarily relevant to completing the observed partial geometry.
+Without an explicit step that allows the geometric stream selectively attend to the most useful FM cues, the fused representation becomes less task-aligned for surface prediction.
+In contrast, alternating attention preserves rich cross-modal interaction while keeping fusion geometry-driven and selective, leading to more effective use of FM knowledge for precise surface completion.
+
+Table 7 : Effect of partial-surface regularization on flight efficiency. Results are averaged over 20 trials per scenario.
+
+Variants Avg Flight Time (s) \,\downarrow Windmill Church Pagoda Schloss w/o Partial Loss 418.8 395.2 261.7 440.5 Ours 329.4 336.6 225.1 363.9
+
+Figure 23: Qualitative impact of partial-surface regularization. (A) flight trajectory and resulting 3D reconstruction of w/o Partial Loss variant. (B) Our trajectory and reconstruction from the same mission.
+
+Lastly, we examine the role of the partial-surface regularization that encourages consistency between the predicted surface and the input partial point cloud.
+We train a variant by removing the partial-surface term from Eq. ( 17 ).
+As reported in Tab. 7 , this ablation noticeably degrades flight efficiency ( \sim 16 - 27\% ), because temporally unstable and geometry-inconsistent predictions (in scale or shape) trigger redundant revisits and unnecessary detours during scanning; Fig. 23 visualizes a representative flight in the worst-affected scenario ( Windmill ).
+To understand the source of this behavior, we further evaluate prediction accuracy.
+Removing the partial loss increases L1-CD by 2.541 and reduces the F-Score from 0.705 to 0.637 (Tab. 6 ).
+The quantitative drop suggests that, without an explicit constraint from the observed geometry, the network is more prone to hallucinate local structures or ignore fine details present in the input.
+For instance, in Fig. 22 B, although the partial point cloud already reveals the two supporting pillars and the hollow region under the arch, the ablated model fails to preserve these concavities and instead predicts a spurious surface.
+Such geometric artifacts directly mislead the planner to allocate viewpoints to non-existent regions, wasting flight time without improving coverage.
+This experiment highlights that the partial loss regularization is essential, as it anchors the prediction to the latest measurements and promotes the prediction accuracy, thereby preventing prediction-induced inefficiency in downstream scanning.
+
+7.3.3 Ablations on Planning
+
+Here we take a closer look at how each component of our prediction-aware hierarchical planner effectively integrates flight skills into our system, yielding superior performance in both efficiency and safety.
+We first isolate the configuration-space construction step and validate its utility across the four simulated scenarios.
+Afterwards, we conduct ablations on the remaining planner design choice, including (1) the temporal consistency awareness in the global planner, (2) the asynchronous computation framework, and (3) the viewpoint-constrained trajectory optimization.
+Their experimental protocol and metrics are consistent with those in Sec. 7.2 Comparisons with State-of-the-Art Methods , with 20 trials executed for each variant in every simulated scenario.
+
+Table 8 : Effect of the proposed configuration-space generation. Values denote per-scenario averages across 20 trials.
+
+Metrics Scenarios SDF Ray Casting Ours Runtime (ms) \,\downarrow Windmill 1214.8 28.5 11.3 Church 1514.4 36.6 15.2 Pagoda 923.2 17.9 14.7 Schloss 1390.0 44.1 14.5 Viewpoint Feasibility (%) \,\uparrow Windmill 100.0 95.6 100.0 Church 100.0 93.7 100.0 Pagoda 100.0 98.1 100.0 Schloss 100.0 94.2 100.0
+
+We evaluate the proposed fast configuration-space determination (Sec. Fast generation of safe configuration space. ) by replacing it with two common alternatives: SDF-based queries and ray casting against the predicted mesh.
+All three variants use identical viewpoint sampling settings.
+We measure (1) computational cost, reported as wall-clock runtime per update including both configuration-space construction and viewpoint checking, and (2) viewpoint feasibility, defined as the fraction of generated viewpoints that lie in free space outside the target geometry ( i.e. , no viewpoints are allowed inside the target volume).
+Tab. 8 summarizes the results.
+Our solution achieves the lowest runtime in all four scenarios, taking only 11.3 - 15.2 ms per update, compared with 17.9 - 44.1 ms for ray casting and 923.2 - 1514.4 ms for SDF queries.
+This translates to a 1.2 - 3.0\times speedup over ray casting and a two-order-of-magnitude improvement over SDF-based fashion, while under the same structural complexity.
+Meanwhile, our method maintains 100\% viewpoint feasibility across all cases.
+In contrast, ray casting occasionally produces infeasible viewpoints (feasibility 93.7\% - 98.1\% ), which can lead to physically unreachable viewpoint requests and compromise downstream safety guarantees.
+Overall, this study confirms that the proposed method is both computationally lightweight and strictly feasible, making it well-suited for viewpoint generation in complex 3D structures.
+
+Table 9 : Ablation experiments on key design choices of the planner. For each scenario, we report mean (Avg), standard deviation (Std), maximum (Max), and minimum (Min) over 20 trials.
+
+Scenarios Variants † Flight Time (s) \,\downarrow Info. Completeness (%) \,\uparrow Avg Response Latency (ms) \,\downarrow Success Rate \,\uparrow Avg Std Max Min Avg Std Max Min Windmill w/o CAGP 543.4 79.95 713.9 437.8 93.57 2.69 96.82 88.16 26.54 20/20 w/o Async. 363.8 12.68 388.1 348.5 95.50 0.45 96.43 94.57 270.91 15/20 w/o VCTO 432.7 23.64 504.5 399.6 95.18 1.38 97.39 92.02 23.12 20/20 Ours 329.4 8.93 357.9 321.4 96.04 0.58 97.11 94.88 25.04 20/20 Church w/o CAGP 598.3 114.38 846.7 477.8 91.48 1.87 95.74 89.05 27.93 19/20 w/o Async. 350.8 11.71 372.1 330.7 94.79 0.74 95.78 92.81 290.37 9/20 w/o VCTO 421.6 13.06 441.6 401.1 92.92 2.01 95.23 90.05 24.07 19/20 Ours 336.6 9.43 364.8 323.6 94.53 0.71 95.54 93.23 25.18 20/20 Pagoda w/o CAGP 372.5 51.57 436.1 295.4 91.84 1.52 94.56 88.47 27.85 19/20 w/o Async. 243.4 15.43 269.2 218.6 93.65 0.97 95.13 92.60 202.65 10/20 w/o VCTO 240.0 10.87 266.7 231.8 93.08 0.69 94.86 92.15 25.52 20/20 Ours 225.1 6.22 240.3 216.2 93.83 0.63 94.62 92.33 24.39 19/20 Schloss w/o CAGP 671.9 117.33 941.2 510.3 95.48 2.27 98.21 93.76 29.26 20/20 w/o Async. 377.1 9.47 391.6 357.2 96.87 0.84 97.79 95.44 266.39 14/20 w/o VCTO 415.3 16.42 441.5 374.2 95.27 1.09 97.16 93.40 23.01 20/20 Ours 363.9 7.52 380.8 349.5 96.50 0.66 97.58 95.45 24.27 20/20
+
+† CAGP : consistency awareness in global planning; Async. : asynchronous computation framework; VCTO : viewpoint-constrained traj. opt.
+
+Figure 24: Qualitative effects of planner ablations. (A) A tangled, time-consuming trajectory resulting from the removal of temporal consistency awareness. (B) Synchronous execution inflates response latency and causes a collision. (C) Deactivating viewpoint constraints introduces backtracking detours to recover missed coverage.
+
+In this study, we disable all consistency-promoting designs in the global planner, forcing it to re-generate the viewpoint set and re-compute the visiting sequence from scratch at every planning cycle.
+In other words, this setting reverts our global planning to off-the-shelf memoryless 3D coverage planners that optimize each cycle in isolation, without accounting for the flight history.
+The results show that removing these operations severely degrades mission efficiency, leading to less predictable and significantly longer flight times.
+As quantified in Tab. 9 , the average flight time increases substantially across all scenarios: by 214.0 seconds in Windmill ( +64.9\% ), 261.7 seconds in Church ( +77.7\% ), 147.4 seconds in Pagoda ( +65.5\% ), and 308.0 seconds in the Schloss ( +84.6\% ).
+Furthermore, the flight-time standard deviations reveal a drastic increase in the variance of flight times, indicating that the resulting trajectories are not only longer on average but also highly erratic and unpredictable.
+This inefficiency is caused by frequent and unnecessary reshuffling of viewpoint distributions and their visiting order, which overlooks global temporal consistency with historical paths, resulting in excessive back-and-forth maneuvers, as qualitatively illustrated by the tangled trajectory in Fig. 24 A.
+
+Here, we assess the benefit of our decoupled, asynchronous architecture by replacing it with a conventional synchronous, serial execution scheme.
+Under this configuration, the high-frequency local planner must wait for the computationally intensive global planner to finish each cycle before producing a new trajectory.
+This enforced blocking severely compromises system responsiveness and proves critically detrimental to flight safety.
+As a result, the mission success rate drops sharply from 98.8\% to 60.0\% (Tab. 9 ).
+The surge in failures directly stems from the system’s reduced ability to respond to unexpected obstacles.
+Specifically, as reported in Tab. 9 , the average response latency increases by nearly an order of magnitude—from approximately 30 ms to 200 - 300 ms.
+Such excessive latency prevents the drone from reacting in time to obstacles that emerge between planning cycles, leading to frequent collisions, as qualitatively illustrated in Fig. 24 B.
+These results confirm that asynchronous design is essential for maintaining real-time responsiveness and ensuring flight safety.
+
+This analysis validates our local trajectory generation strategy, which enforces that the trajectory preserves the structural coverage prescribed by the global path.
+To this end, we evaluate a variant where this hard constraint is removed, allowing the optimizer to freely adjust intermediate points as movable waypoints rather than requiring the trajectory to pass through all designated viewpoints.
+As listed in Tab. 9 , this relaxed alternative eventually reaches comparable information completeness, but at a clear cost in mission efficiency.
+Without the constraint, the average flight time expands across all scenarios without this constraint, respectively by 31.4\% , 25.3\% , 6.6\% , and 14.1\% (Tab. 9 ).
+This inefficiency arises from suboptimal behaviors like backtracking; the planner might initially generate a shorter, smoother trajectory by skipping some crucial viewpoints, only to discover later that a target surface region was missed to scan.
+This forces the planner to produce a long, inefficient detour to return to the vicinity of the skipped viewpoints to complete coverage (see Fig. 24 C for an example).
+This evaluation demonstrates that our viewpoint-constrained optimization is a more efficient strategy, balancing the requirements of data integrity and minimizing flight time.
+
+8 Conclusion
+
+In this work, we study the aerial 3D target structure scanning problem in open-world environments and answer a central system-level question: What architecture is currently well-suited for this problem?
+
+We find that dominant paradigms remain constrained by either effortful human priors or restrictive assumptions, lack scene understanding that is necessary for high efficiency, and afford limited safety assurance in cluttered settings.
+These limitations hinder practical viability across diverse scanning missions.
+To this end, we propose F ly C o, a tailored perception-prediction-planning architecture that efficiently leverages foundation models to enable fully autonomous, prompt-driven target scanning in various, unknown open-world scenes, requiring only low-effort texts and visual annotations from human inputs.
+Comprehensive evaluations, encompassing both in-the-wild demonstrations and quantitative simulations, substantiate that the proposed system demonstrates significant advantages over existing paradigms and represents a more suitable recipe for this open-world aerial scanning task.
+
+This superior performance is rooted in the synergistic and efficient integration of three FM-empowered components that jointly close the loop from prompt to scanning flight.
+First, perception utilizes the world understanding of FMs to robustly ground abstract prompts onto physical targets without requiring manually defined operational zones, overcoming a key usability barrier of existing works when deployed in the open world.
+Second, by distilling knowledge in FMs, the partial-to-complete predictor analyzes multi-modal cues and provides global foresight guidance to suppress redundant scanning, while its strong zero-shot generalization ensures system reliability in novel environments.
+Third, the prediction-aware hierarchical planner converts this foresight into efficient and safe trajectories, achieving 1.25 - 3.0\times efficiency gains with higher information completeness over competing baselines, while maintaining real-time responsiveness for safety-critical obstacle avoidance.
+In summary, F ly C o offers a practical and extensible system blueprint: it seamlessly incorporates the powerful understanding and inherent knowledge of FMs with advanced flight skills into aerial robots without expensive data requirements while keeping online components within real-time budgets, and it supports flexible modular replacement to naturally accommodate future progress in FMs and robotics planning.
+The full system implementation and development configurations will be released to enable reproducibility and future research.
+
+Beyond this, F ly C o enables a general capability for prompt-grounded, targeted 3D data acquisition in complex real environments, where manual specification of operational volumes or exhaustive exploration is undesirable.
+This can support a range of field workflows that require repeatable, structure-centric capture, e.g. , infrastructure inspection, cultural-heritage documentation, and ecological habitat monitoring.
+By turning lightweight human intent into safe and efficient scanning trajectories, our system may reduce operator burden and improve the scalability of collecting task-relevant 3D observations.
+At the same time, realizing this potential broadly calls for further advances on several fronts, which we discuss next as limitations and future directions.
+
+8.1 Limitations and Future Work
+
+8.1.1 Limited utilization of textual information.
+
+Although text prompts play a crucial role in grounding user intent, their expressive power is not yet fully exploited in the current system.
+First, we intentionally restrict the textual input to short, structured phrases describing salient target attributes.
+This design choice improves robustness and reduces ambiguity in open-world deployments, but it also limits the expressiveness of free-form natural language and constrains how flexibly users can specify complex intent.
+Second, the quantitative gains brought by textual conditioning in surface prediction remain marginal compared with geometric and visual cues.
+A key reason lies in data imbalance during training: a single 3D model can generate many partial point clouds and image observations, all paired with the same textual description.
+This many-to-one mapping biases learning towards geometry and vision while weakening the relative influence of language.
+Similar dilemma has been observed in recent vision-language-action models (VLA), where language often serves as a weak signal rather than a dominant driver ( Zitkovich et al. 2023 ).
+Future work will support richer language forms, explore improved data balancing strategies, and tighter cross-modal alignment objectives to better elevate the impact of text.
+
+8.1.2 Dependence on offboard computation for prediction.
+
+At present, the surface prediction module runs on a ground device rather than fully onboard the aerial platform.
+This choice is motivated by two considerations: prediction is not strictly time-critical for closed-loop flight, and incorporating FMs incurs substantial computational overhead that makes sub-second onboard inference impractical on current edge hardware.
+While reliable communication is available in most outdoor scanning scenarios, this dependency may become a limiting factor in communication-constrained environments such as underground mines, enclosed industrial facilities, or electromagnetically disturbed sites.
+Therefore, fully onboard deployment is a necessary step towards broader applicability.
+An important future direction is to compress and distill foundation-model knowledge into lighter-weight predictors, enabling accurate yet efficient inference on edge devices and eliminating reliance on external communication.
+
+8.1.3 Scalability beyond single-drone, single-target missions.
+
+The current system is constrained by the endurance of a single aerial robot and is thus designed to scan one target structure per mission.
+Scaling this capability to city-scale or large natural environments calls for coordinated multi-drone operation.
+This introduces new challenges, including dynamic high-level task allocation, inter-robot coordination, and real-time reassignment of scanning objectives based on partial observations.
+Future work will investigate multi-agent extensions of the proposed architecture, where multiple drones collaboratively divide target structures, adaptively replan assignments, and jointly minimize overall mission time while maintaining safety and coverage guarantees.
+Such extensions would upgrade the system from single-structure autonomy to large-scale, cooperative open-world scanning.
+
+Appendix A Appendix
+
+This appendix provides supplementary video materials that qualitatively illustrate and further validate the proposed F ly C o system.
+
+Extension 1: Overall System Overview and Motivation. This video provides an overview of the F ly C o system and its research context.
+It first introduces the motivation behind autonomous 3D target structure scanning in open-world environments and highlights the limitations of existing paradigms.
+The video then introduces the motivations behind our system design and summarizes the advancement against existing paradigms, highlighting the novelty of integrating foundation models to empower drones.
+Finally, representative results are presented, including in-the-wild flight demonstrations and simulation visualizations, to illustrate the system’s effectiveness and its ability to address the identified research challenges.
+
+Extension 2: Precise Scene Understanding for Adaptive Scanning—Arch Bridge Linking Large Buildings. This video corresponds to Sec. 7.1.2 Precise Scene Understanding for Adaptive Scanning .
+It demonstrates F ly C o’s ability to accurately ground user-specified targets in cluttered real-world scenes and to adaptively scan a distinctive arch bridge linking two large buildings, based solely on low-effort human prompts.
+
+Extension 3: Robust Scanning for Large-scale Structures—Concert Hall within Campus. This video corresponds to Sec. 7.1.3 Robust Scanning for Large-scale Structures .
+It showcases F ly C o’s performance in a large-scale scenario: scanning a 100 m \times 60 m \times 35 m concert hall nestled among hills and lakes.
+This experiment specifically validates the robustness and stability during large-scale missions—addressing performance degradation caused by sparse initial observations, all enabled by the system’s generalizable surface prediction capability.
+
+Extension 4: Efficient and Safety-assured Scanning within Clutters—Castle Gate amidst Park Trees. This video corresponds to Sec. 7.1.4 Efficient and Safety-assured Scanning within Clutters .
+It demonstrates the full deployment of the F ly C o system for scanning a castle gate.
+This test showcases the system’s ability to seamlessly integrate flight skills with guidance from foundation models, achieving efficient and safe scanning flights while ensuring complete target coverage.
+
+Extension 5: Efficient and Safety-assured Scanning within Clutters—Red-brick Building within a Dense Forest. This video corresponds to Sec. 7.1.4 Efficient and Safety-assured Scanning within Clutters .
+It records the complete procedure of F ly C o autonomously scanning a red-brick building surrounded by trees.
+The results demonstrate F ly C o’s ability to simultaneously maintain scanning efficiency, comprehensive coverage, and real-time obstacle avoidance in highly cluttered environments.
+
+Extension 6: Benchmark Comparisons and Ablation Studies. This video corresponds to Sec. 7.2 Comparisons with State-of-the-Art Methods and Sec. 7.3 Ablation Studies .
+It presents qualitative and quantitative comparisons between F ly C o and representative state-of-the-art approaches, highlighting advancements in mission efficiency, coverage completeness, and flight safety.
+The video further includes visualizations of ablation studies, validating the contribution of individual system components and supporting the design choices of the proposed system architecture.
+
+Access to High-resolution Videos. High-resolution versions of all supplementary videos are publicly available via the YouTube playlist: https://www.youtube.com/playlist?list=PLqjZjnqsCyl40rw3y15Yzc7Mdo-z1y2j8 .

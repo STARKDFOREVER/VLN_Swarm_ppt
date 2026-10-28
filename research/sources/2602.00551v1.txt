@@ -1,0 +1,305 @@
+APEX: A Decoupled Memory-based Explorer for Asynchronous Aerial Object Goal Navigation
+
+Aerial Object Goal Navigation, a challenging frontier in Embodied AI, requires an Unmanned Aerial Vehicle (UAV) agent to autonomously explore, reason, and identify a specific target using only visual perception and language description. However, existing methods struggle with the memorization of complex spatial representations in aerial environments, reliable and interpretable action decision-making, and inefficient exploration and information gathering. To address these challenges, we introduce APEX (Aerial Parallel Explorer), a novel hierarchical agent designed for efficient exploration and target acquisition in complex aerial settings. APEX is built upon a modular, three-part architecture: 1) Dynamic Spatio-Semantic Mapping Memory, which leverages the zero-shot capability of a Vision-Language Model (VLM) to dynamically construct high-resolution 3D Attraction, Exploration, and Obstacle maps, serving as an interpretable memory mechanism. 2) Action Decision Module, trained with reinforcement learning, which translates this rich spatial understanding into a fine-grained and robust control policy. 3) Target Grounding Module, which employs an open-vocabulary detector to achieve definitive and generalizable target identification. All these components are integrated into a hierarchical, asynchronous, and parallel framework, effectively bypassing the VLM’s inference latency and boosting the agent’s proactivity in exploration. Extensive experiments show that APEX outperforms the previous state of the art by +4.2% SR and +2.8% SPL on challenging UAV-ON benchmarks, demonstrating its superior efficiency and the effectiveness of its hierarchical asynchronous design. Our source code is provided in GitHub .
+
+
+
+Figure 1 : APEX addresses three critical limitations in prior works . 1) Memory: APEX employs a rich 3D dynamic map for robust spatial reasoning. 2) Decision-Making: APEX uses decoupled modules, separating semantic understanding from action generation for more reliable and interpretable control. 3) Efficiency: APEX employs a parallel and asynchronous framework that mitigates inference latency and boosts exploration proactivity.
+
+Figure 2 : The overall framework of APEX .
+Module 1 extracts and integrates visual information into 3D dynamic spatio-semantic maps, serving as the agent’s memory. Module 2 utilizes the stored information from Module 1 for action decision-making via an RL-based model. Module 3 continuously performs object detection on visual observations to obtain precise target locations. The three modules are integrated into a hierarchical asynchronous parallel system.
+
+1 Introduction
+
+The rapid increase in the use of Unmanned Aerial Vehicles (UAVs) [ 47 ] and Vision-Language Models (VLMs) [ 51 , 21 , 9 ] are driving advancements in aerial embodied intelligence [ 38 , 32 ] . The combination of these technologies has greatly advanced Vision-Language Navigation (VLN) [ 54 , 43 , 10 ] , traditionally focused on indoor, ground-based scenarios, into the challenging domain of Aerial Vision-Language Navigation (AVLN) [ 25 , 17 , 8 , 48 ] . This transition represents a significant leap in complexity, moving from constrained 2D planes to complex 3D spaces. However, a critical limitation of many existing AVLN frameworks is their reliance on fine-grained, step-by-step language instructions [ 6 , 22 , 42 ] . Such detailed guidance is often impractical to obtain in real-world settings and fundamentally constrains the agent’s autonomy, limiting the scalability and applicability of these systems in open-ended exploration tasks [ 53 , 57 ] .
+
+To address this limitation, we focus on a more challenging and practical task: Aerial Object Goal Navigation (Aerial ObjectNav) [ 44 ] . In this paradigm, the UAV agent is tasked with locating a specific object described by a high-level textual cue ( e.g . , “a red tent”) using only its onboard visual sensors. This requires the agent to autonomously explore the environment, reason about spatial relationships, and actively search for the target, mirroring a more realistic operational scenario.
+
+As shown in Fig. 1 , developing an Aerial ObjectNav agent faces three major challenges that are insufficiently addressed by prior work:
+
+1) Ineffective Spatial-Temporal Information Integration . The transition from ground to aerial navigation brings an exponential increase in the volume and complexity of perceptual information [ 23 , 18 , 37 ] . Operating in expansive 3D environments, agents must execute long-horizon tasks that require effective long-term memory. However, many existing approaches [ 4 , 56 ] fail to integrate historical observations with complex spatial information, resulting in inefficient exploration and repeated errors. Other works [ 19 , 26 , 45 ] employ abstract memory structures like topological maps, but these representations often sacrifice crucial geometric and metric fidelity, impairing the agent’s ability to perform fine-grained reasoning and planning in complex aerial terrains.
+
+2) The Gap Between Semantic Understanding and Actionable Control . While VLMs exhibit remarkable proficiency in grounding language to visual concepts, a significant gap exists between their high-level semantic reasoning and the low-level action control required for navigation [ 59 ] . Contemporary methods [ 40 , 39 , 34 , 27 ] attempt to use a VLM as an end-to-end decision-maker, directly mapping visual-linguistic inputs to actions. This approach not only demands vast quantities of high-quality demonstration data but also results in policies that are often unstable, unreliable, and lack interpretability, making them unsuitable for safety-critical applications, especially in aerial environments.
+
+3) Computational Latency and Real-Time Constraints . The high computational cost of running large VLMs presents a critical challenge to real-world deployment [ 7 ] . Most existing frameworks [ 52 , 12 , 44 ] overlook the severe time costs, implicitly assuming a “stop-and-think” execution model. This latency prevents the smooth, continuous motion necessary for efficient and practical UAV operation, making these systems unsuitable for real-time missions.
+
+To overcome these challenges, we propose APEX (Aerial Parallel Explorer), a novel hierarchical agent designed for efficient aerial object navigation. APEX’s core contribution lies in decoupling the complex navigation task into three specialized modules: a Dynamic Spatio-Semantic Mapping module, an RL-based Action Decision module, and a Target Grounding module for precise and definitive target identification. By integrating these components within an asynchronous, parallel framework, APEX enables effective long-horizon planning in complex aerial environments, enhances the reliability and interpretability of decision-making, and achieves high operational efficiency.
+
+Before delving into details, our contributions are summarized as follows:
+
+We propose a novel dynamic 3D mapping mechanism specifically for aerial object navigation, which enhances the agent’s ability to integrate and maintain complex spatial information over long-horizon tasks in expansive 3D environments.
+
+We demonstrate the advantages of a modular, decoupled design for planning and control in Aerial ObjectNav. Through extensive experiments, we show that this approach surpasses end-to-end models in terms of reliability and interpretability.
+
+We introduce a multi-module, asynchronous parallel architecture. Our experiments demonstrate that this framework improves exploration efficiency in Aerial Object Navigation, which is often overlooked in prior work. This paradigm sets a new standard for building practical and responsive aerial agents.
+
+2 Related Work
+
+2.1 Object Goal Navigation
+
+Object Goal Navigation is an Embodied AI task where an agent must autonomously find a target object in an unseen environment [ 1 ] . Researches in this area, sped up by photorealistic simulators like Matterport3D [ 5 ] and AI2-THOR [ 15 ] , has evolved from classical modular pipelines to learning-based paradigms. To improve generalization, many modern methods employ imitation learning (IL) or reinforcement learning (RL) to train end-to-end navigation policies [ 58 , 11 , 30 , 13 ] .
+
+The capabilities of Multimodal Large Language Models (MLLMs) have recently revolutionized this domain by equipping agents with powerful commonsense reasoning [ 49 , 20 ] . For instance, NavGPT-2 [ 60 ] aligns visual and linguistic information within a frozen LLM to bridge the performance gap between generalist LLM agents and specialized navigation models. Similarly, VoroNav [ 41 ] leverages an LLM to interpret semantic and topological information from a dynamically map, enabling more efficient zero-shot exploration by reasoning about navigational waypoints.
+
+However, the challenges of ObjectNav are significantly amplified when transitioning from ground to aerial navigation [ 12 , 14 ] . The complexity of vast 3D environments places greater demands on an agent’s perception and planning. To this end, UAV-ON [ 44 ] established a large-scale simulation benchmark for aerial ObjectNav, while PRPSearcher [ 12 ] proposed a 3D semantic map-based framework to improve spatial understanding. Despite this progress, developing an agent that is both efficient and reliable for long-horizon aerial tasks remains a critical open problem. To address this, our Dynamic-Mapping Module improves the agent’s abilities of memorizing in aerial navigation, while the Action Decision Module enables more reliable action outputs.
+
+2.2 Aerial Vision-Language Navigation
+
+Inspired by the advancements in ground-based VLN [ 2 , 16 ] , Aerial Vision-Language Navigation (AVLN) has recently emerged as a challenging new frontier, extending embodied navigation to the complexities of 3D aerial environments [ 36 , 35 , 55 ] . Foundational works like AerialVLN [ 25 ] provide a dedicated simulator, a large-scale dataset, and a baseline method. Following this, TravelUAV [ 40 ] introduced continuous control for more realistic simulation and proposed an end-to-end LLM-based agent for aerial navigation. Recent improvements have focused on specific modules: To enhance long-horizon task performance, SkyVLN [ 19 ] and NavAgent [ 26 ] introduced topological map architectures as the agent’s memory modules, abstracting spatial relationships for efficient planning. To boost the generalization and adaptability of the VLM backbone, FlightGPT [ 4 ] employs a two-stage training pipeline, including Supervised Finetuning and GRPO algorithm. To improve spatial reasoning, CityNavAgent [ 52 ] enhanced the agent’s understanding of 3D geometry by projecting visual information onto point clouds.
+
+However, existing AVLN methods exhibit notable limitations. First, their performance is often contingent upon high-quality, detailed language instructions, which may not be available in more open-ended, goal-driven scenarios. Furthermore, a critical and under-explored issue is the loss of complex spatial information in their memory module designs. For instance, while topological maps are effective for high-level planning, they often discard the precise geometric details essential for fine-grained maneuvering and obstacle avoidance in cluttered 3D spaces. We address these problems with a system that navigates using simple goal descriptions, supported by dynamic 3D maps that retain crucial spatio-semantic information.
+
+3 Methodology
+
+(a) 3D Dynamic Map Updating . The module processes RGB-D input to update three maps with specific rules: 1) Attraction Map: A grid’s score is updated only if the current observation is geometrically closer. 2) Exploration Map: Scores from new observations are added to existing ones. 3) Obstacle Map: All grids with detected obstacles are marked as occupied.
+
+(b) Asynchronous Parallel Framework . The agent’s modules operate in parallel at different frequencies. Since the Map Update module runs slower than the Action Decision module, the Obstacle Map input for the policy is always updated between consecutive timesteps, while the Attraction and Exploration Maps may remain the same.
+
+Figure 3 : Detailed architecture of the Dynamic Map Module and the Asynchronous Parallel Framework.
+
+3.1 Task Formulation
+
+We formulate the Aerial Object Goal Navigation task as a sequential decision-making process. At each timestep t , the agent receives a visual observation O_{t} , its self state S_{t} , and a text description D . In a basic setting, the agent’s policy, denoted by \pi , maps the current sensory inputs and the goal description to an action A_{t} from a discrete action space \mathcal{A} :
+
+A_{t}=\pi(O_{t},S_{t},D). (1)
+
+For long-horizon tasks that require efficient exploration and recall of the environment, we introduce a memory module MEM to aggregate spatial-semantic information. The module updates the memory state from MEM_{t-1} by incorporating new information from O_{t} and S_{t} :
+
+MEM_{t}=f_{\mathrm{update}}(MEM_{t-1},O_{t},S_{t}). (2)
+
+With this memory-augmented framework, the agent’s policy now makes decisions on the accumulated memory:
+
+A_{t}=\pi(O_{t},S_{t},MEM_{t},D). (3)
+
+The ultimate goal of the agent is to reach the target efficiently, formulated as finding a policy \pi^{*} that maximizes the success metric.
+
+3.2 Overview
+
+As illustrated in Fig. 2 , the APEX architecture is designed to supports efficient Aerial ObjectNav by addressing three core challenges of the task. Each of them is handled by a dedicated module:
+
+Dynamic Spatio-Semantic Mapping Module . To navigate purposefully, the agent first needs to build a model of the world. This module creates and maintains this model by processing visual and textual inputs from an MLLM [ 3 ] and a segmentation model [ 31 ] . It generates three dynamic 3D maps: the Attraction Map to guide the agent toward the goal, the Obstacle Map for safety, and the Exploration Map to ensure active exploration.
+
+RL-based Action Decision Module . With a clear understanding of the environment, the agent must then choose its next action. This module uses the generated maps as input for a Proximal Policy Optimization (PPO) [ 33 ] policy network. The network learns to translate high-level spatial intelligence into low-level actions, enabling effective and reliable movements.
+
+Target Grounding Module . To solve the “last-mile” problem of target identification, the agent needs to be certain that it has found the correct object. This module uses a dedicated object detector [ 24 ] to confirm the target’s location.
+
+These modules operate in a parallel asynchronous framework, ensuring high efficiency and overcoming latency bottlenecks for smooth exploration. The algorithm flow is provided in Appendix A.
+
+3.3 3D Dynamic Grid-based Map
+
+As illustrated in Fig. 3(a) , our method utilizes a 3D grid-based map M as a persistent memory carrier, which is dynamically updated with spatio-semantic information at each timestep. This process involves two key stages: 3D back-projection and map generation.
+
+3D Back-projection . Given a depth image, this process back-projects the 2D pixel grid into a 3D point cloud in the world frame. This transformation uses the camera intrinsics K , per-pixel depth values, and the current state of the agent S_{t} . Each resulting 3D point is then discretized to identify its corresponding grid index in the map M . We refer to this entire pipeline as the Reconstruction Projector, RP(·).
+
+Attraction Map Generation . For effective Object Goal Navigation, the agent must infer which regions are promising for finding the target object. To this end, we introduce the concept of an object-centric attraction map, M_{\mathrm{attr}} , a channel within our main map M . This map quantifies the semantic relevance of observed objects to the navigation goal. The generation process begins by leveraging MLLM’s advanced capabilities in visual grounding and commonsense reasoning [ 3 ] . Given the current observation O_{t} and the goal description D , the MLLM identifies N distinct objects, outputting their text captions c_{1},c_{2}...,c_{N} and the corresponding attraction scores c_{1},c_{2}...,c_{N} . A higher score s_{i} indicates a stronger semantic link between the object c_{i} and the target. We denote this process as CAP(·):
+
+\{(c_{i},s_{i})\}_{i=1}^{N}=\mathrm{CAP}(O_{t},D). (4)
+
+Subsequently, we employ an open-vocabulary segmentation model [ 31 ] to obtain a pixel mask Mask_{i} for each caption c_{i} , denoted as SEG(·):
+
+{Mask_{i}}=\mathrm{SEG}(O_{t},c_{i}). (5)
+
+Finally, the attraction map M_{\mathrm{attr}} is updated by projecting these semantic masks into the 3D grid. For each voxel v in the map, the update follows two rules:
+
+Majority Ownership : The voxel is claimed by the object i^{*} that projects the most pixels into it.
+
+Closest Observation First : The voxel’s score is updated only if the new observation is geometrically closer than any prior observation.
+
+Let s_{\mathrm{new}} and d_{\mathrm{new}} be the attraction score and minimum depth of the pixels from the winning object i that map to voxel v . The update rule for the attraction score M_{\mathrm{attr}}(v) and its associated minimum depth M_{\mathrm{depth}}(v) is:
+
+\begin{cases}M_{\mathrm{attr}}(v)\leftarrow s_{\mathrm{new}}\\
+M_{\mathrm{depth}}(v)\leftarrow d_{\mathrm{new}}\end{cases}\text{ if }d_{\mathrm{new}}<M_{\mathrm{depth}}(v). (6)
+
+This ensures that the map robustly represents the most relevant and reliable information from the agent’s perspective.
+
+Exploration Map Generation . To incentivize the agent to explore unknown regions and gather more environmental information, we maintain an Exploration Map M_{\mathrm{expl}} . This channel quantifies the observation density of each spatial region, representing an “exploration score”.
+
+The map is updated at each timestep t using a ray casting approach. For the set of 3D world points P_{w} from the current depth observation, we cast a set of rays \mathcal{R} originating from the camera’s position t_{t} towards each point P_{w} . The set of all voxels traversed by a single ray r , denoted as V(r) , is identified using a 3D voxel traversal algorithm. The union of these sets constitutes all currently visible voxels:
+
+\mathcal{V}_{\mathrm{visible}}=\bigcup_{r\in\{r\}}V(r). (7)
+
+For each voxel v\in\mathcal{V}_{\mathrm{visible}} , we calculate an exploration gain that decays exponentially with its distance from the agent. The incremental update, \Delta M_{\mathrm{expl}} , is calculated as:
+
+\Delta M_{\mathrm{expl}}(v)=\exp{(-\lambda\cdot\|p_{v}-t_{t}\|_{2})}, (8)
+
+where p_{v} is the center of voxel v , and \lambda is the decay rate. This incremental value is then accumulated into the map:
+
+M_{\mathrm{expl,t}}(v)\leftarrow M_{\mathrm{expl,t-1}}(v)+\Delta M_{\mathrm{expl}}(v). (9)
+
+This mechanism encourages the agent to prioritize navigating towards less observed regions.
+
+Obstacle Map Generation . To enhance safe navigation and path planning, we also construct an Obstacle Map, M_{\mathrm{obst}} . This map provides a persistent representation of occupied space. It is populated directly by the 3D Back-Projection process RP(·). Any voxel that contains one or more back-projected points from the depth map is marked as an obstacle. The update rule for a voxel v is simply:
+
+M_{\mathrm{obst}}(v)\leftarrow 1\quad\text{ if }{v}\text{ contains any }{P_{w}}. (10)
+
+3.4 RL-based Action Decision Module
+
+The Action Decision Module employs a policy network, trained with the Proximal Policy Optimization (PPO) algorithm, to map the constructed 3D maps to low-level control actions. This process includes feeding three distinct 3D maps into three separate CNN feature extractors. The resulting feature vectors are then concatenated into a unified representation, which is shared by both the actor and critic networks that form the core of the policy network. This map-based approach enhances the policy’s reliability and interpretability compared to end-to-end methods. To inject navigation priors and improve training efficiency, we design a composite reward function, R_{t} , which is a weighted sum of several components:
+
+Sparse Reward . These rewards are given only at the end of an episode to signify ultimate success or failure.
+
+A large positive reward, R_{\mathrm{success}} , is given if the agent navigates to within a threshold distance of the target.
+
+A large negative reward, R_{\mathrm{penalty}} , is given for terminal states such as collisions or flying out of bounds.
+
+Attraction Reward . This dense reward encourages the agent to leverage the semantic guidance from the Attraction Map. At each step t , the reward is calculated by summing the attraction scores of all observed voxels, weighted by a linear distance decay. For the set of visible voxels \mathcal{V}_{\mathrm{visible}} within a distance threshold d_{thresh} , the reward is:
+
+R_{\mathrm{attr}}=\sum_{v\in\mathcal{V}_{\mathrm{visible}}}M_{\mathrm{attr}}(v)\cdot\left(1-\frac{\|p_{v}-t_{t}\|_{2}}{d_{\text{thresh}}}\right), (11)
+
+where M_{\mathrm{attr}}(v) is the attraction score of voxel v , p_{v} is its world coordinate, t_{t} is the agent’s position at time t , and the term in parentheses provides the linear decay. This reward incentivizes the agent to move towards and observe regions with high semantic relevance to the target.
+
+Exploration Reward . This dense reward incentivizes the agent to explore unknown areas to gather more information. It is inversely proportional to the voxel’s current exploration score in M_{\mathrm{expl}} :
+
+R_{\mathrm{expl}}=\sum_{v\in\mathcal{V}_{\mathrm{visible}}}(\epsilon-M_{\mathrm{expl}}(v))\cdot\left(1-\frac{\|p_{v}-t_{t}\|_{2}}{d_{\text{thresh}}}\right), (12)
+
+where \epsilon represents the saturation point for exploration.
+
+Finally, the total reward at each timestep t is the weighted sum of these components:
+
+R_{t}=R_{\mathrm{attr}}+\alpha R_{\mathrm{expl}}+R_{\mathrm{spar}}, (13)
+
+where \alpha balances the scale of the attraction reward and the exploration reward.
+
+3.5 Target Grounding Module
+
+While the 3D map guides the agent to the general vicinity of the target, the Target Grounding Module is responsible for the final, precise localization. This module operates in parallel with other components, continuously scanning each visual observation to detect the target.
+
+At each step in this phase, the agent employs an open-vocabulary object detector, GD(·), on its current RGB observation O_{t} to find instances matching the goal description D [ 24 ] . The detector outputs a set of candidate bounding boxes and their associated confidence scores:
+
+\mathrm{(bbox_{j},conf_{j})}\}_{j=1}^{K}=\mathrm{GD}(O_{t},D)). (14)
+
+If the highest confidence score exceeds a predefined threshold, the target is considered successfully grounded. The precise 3D world coordinate of the target P_{\mathrm{target}} will be computed by the Reconstruction Projector RP(·).
+
+3.6 Asynchronous Parallel Framework
+
+To address the computational bottleneck imposed by large-scale VLM inference, we integrate our modules into an asynchronous parallel framework, which is illustrated in Fig. 3(b) . The Attraction Map and Exploration Map serve as shared data structures that mediate information transfer between different modules, which operate at varying frequencies. The framework consists of three main components, ordered from lowest to highest operational frequency:
+
+Dynamic Map Module . This module operates at a lower frequency and is responsible for the most computationally intensive tasks. It runs the VLM-based inference to generate attraction scores and performs ray casting to compute exploration gains. The resulting updates are asynchronously written to the shared Attraction Map and Exploration Map.
+
+Action Decision Module . Running at the agent’s main control frequency, this module is responsible for real-time navigation. At each action step, it updates the Obstacle Map using the latest sensor data, without time-consuming processes. Then it reads the most recent versions of the Attraction Map and Exploration Map from the shared memory. These three maps collectively inform the action policy, ensureing that even if the semantic guidance is slightly stale, the agent can always navigate safely based on up-to-the-minute obstacle information.
+
+Target Grounding Module . This module also operates at a high frequency, continuously applying the open-vocabulary detector GD(·) to the RGB observations. This high-rate execution maximizes the probability of detecting the target as soon as it becomes visible, without being constrained by the slower semantic mapping cycle.
+
+4 Experiment
+
+Table 1 : Comparison with Baselines . APEX achieves SOTA performance across various types of agents, including basic methods, ground navigation, and aerial navigation techniques.
+
+Method Seen Unseen Overall SR \uparrow NE \downarrow OSR \uparrow SPL \uparrow SR \uparrow NE \downarrow OSR \uparrow SPL \uparrow SR \uparrow NE \downarrow OSR \uparrow SPL \uparrow RE 1.12 32.75 3.37 0.62 0.0 28.45 9.68 0.0 0.83 31.64 5.00 0.46 FBE [ 46 ] 4.49 66.02 11.24 2.57 6.45 63.52 12.90 6.45 5.00 65.38 11.67 3.5 MLLM-N [ 3 ] 0.0 30.39 3.37 0.0 3.23 29.83 12.88 3.23 0.83 30.25 5.83 0.83 CLIP-H [ 44 ] 6.74 46.38 12.36 4.58 3.23 49.51 16.13 3.67 5.83 47.19 13.33 4.34 L3MVN-Z [ 50 ] 8.99 61.64 15.73 6.57 9.69 63.07 16.12 9.68 9.17 62.01 15.83 7.37 TRAVEL [ 40 ] 6.74 56.66 13.48 4.82 9.68 53.12 16.15 7.60 7.48 55.75 14.17 5.54 AOA-F [ 44 ] 7.87 47.68 17.98 4.21 6.45 48.57 16.09 3.98 7.50 47.90 17.50 4.15 APEX 12.36 55.59 19.10 9.13 16.13 51.74 22.58 13.03 13.33 54.59 20.00 10.14
+
+4.1 Experiment Settings
+
+Dataset and Environment . We evaluate our proposed method using the UAV-ON benchmark [ 44 ] . This recently proposed benchmark is specifically designed for the Aerial ObjectNav task, providing a challenging and realistic simulation environment. It features 14 photorealistic, large-scale outdoor environments and comprises a total of 10,000 navigation episodes, split for training and testing. In each episode, the agent is tasked with autonomously navigating to a target object based on a given textual description.
+
+Evaluation Metrics . We employ four standard metrics widely used in embodied navigation tasks to provide evaluations of navigation accuracy and path efficiency. Success Rate (SR) measures the percentage of episodes where the agent stops within a predefined distance threshold. Navigation Error (NE) is the average final Euclidean distance between the agent’s position and the target’s center at the end of each episode. Oracle Success Rate (OSR) measures success assuming an oracle stops the agent at the point along its trajectory that is closest to the target. Success-weighted Path (SPL) evaluates both success and efficiency by penalizing inefficient paths, weighting the success rate by the ratio of the optimal path length to the agent’s actual path length.
+
+Baselines . To demonstrate the effectiveness of APEX, we compare it against a comprehensive set of baselines spanning different categories, including basic methods, ground navigation, and other aerial navigation techniques.
+
+Random Exploration : A naive agent that selects actions randomly at each timestep until the stop action is chosen.
+
+Frontier-based Exploration [ 46 ] : A classic exploration method without leveraging semantic information.
+
+MLLM-Direct Navigation [ 3 ] : An end-to-end approach where MLLM directly maps raw egocentric observations and the target description to actions.
+
+CLIP-H [ 44 ] : This method uses CLIP [ 28 ] to compute the similarity between observations and the textual goal, guiding the agent towards semantically relevant areas.
+
+L3MVN-Zeroshot [ 50 ] : A novel method for ground-based ObjectNav. It uses an MLLM to fuse semantic information with a frontier map for navigation decisions.
+
+TravelUAV [ 40 ] : A recent LLM-based framework designed for the AVLN task. To adapt to the experimental setup, the model’s action outputs were discretized.
+
+AOA-F [ 44 ] : An Aerial ObjectNav method that processes and feeds the target description, RGB observations, and depth observations into an LLM to generate actions.
+
+RL Training . The policy network in our Action Decision Module maps 3D grid-based maps to discrete actions. We employ the Proximal Policy Optimization (PPO) algorithm for training this policy. PPO is widely used in navigation tasks because of its stability and strong performance [ 33 ] , making it a reliable choice for our work. Our model is trained on a set of 36 tasks, comprising 4 distinct tasks across 9 environments. To accelerate training, we use 4 parallel environments, with each operating on a different map to enhance data diversity. Within each environment, the agent cycles through the map’s designated tasks. For each task, the agent collects experience over 10 consecutive episodes before proceeding to the next.
+
+To enhance training stability, we adopt a two-stage training approach. Initially, a goal-agnostic exploration policy is pretrained using only the exploration reward R_{\mathrm{expl}} and the terminal penalty R_{\mathrm{penalty}} . This helps the agent establish a robust foundation for safe navigation and obstacle avoidance. Subsequently, this model is fine-tuned by introducing the attraction reward R_{\mathrm{attr}} and the success reward R_{\mathrm{success}} , guiding the policy to leverage semantic cues from the Attraction Map for efficient, goal-directed navigation. This curriculum effectively decouples the learning of general navigation skills from task-specific behaviors, fostering a final policy that balances exploration and exploitation. More training details are provided in Appendix D.
+
+Table 2 : Comparison of Efficiency and Security.
+
+Method Step Latency (s) Safe Dist. (m) L3MVN-Z 1.26 330.64 TRAVEL 1.71 223.17 AOA-F 5.29 212.36 APEX 0.97 345.51
+
+Figure 4 : A case study of the APEX agent navigating to the target “Umbrella”. The figure shows the dynamic integration of the Attraction, Exploration, and Obstacle Maps in the mission, leading to successful navigation. More visualized results are demonstrated in Appendix B.
+
+4.2 Experimental Results
+
+Comparison with Baselines . Tab. 1 presents the comparative results of APEX and the baseline methods across four evaluation metrics. Among the basic methods, Frontier-based Exploration (FBE) significantly outperforms Random Exploration, demonstrating the fundamental benefit of systematic exploration over naive behavior. VLM-based methods, such as CLIP-H, highlight how the semantic understanding of visual scenes can effectively guide the agent. Similarly, TravelUAV, an AVLN method, also shows strong performance, but its framework is tailored for detailed linguistic instructions. Additionally, L3MVN, a method for ground-based ObjectNav, also delivers highly competitive results, underscoring the power of fusing semantic information with spatial maps. However, its performance is constrained by its design, which is not optimized for the complexities of 3D aerial environments. Our proposed method, APEX, establishes a new state-of-the-art on this benchmark, achieving a 4.16% improvement in Success Rate (SR) and a 2.77% improvement in Success-weighted Path Length (SPL), while also attaining the highest Oracle Success Rate (OSR). Regarding the higher Navigation Error (NE), we attribute this to the agent’s proactive exploration strategy, which can lead to a greater final distance from the target in the subset of unsuccessful episodes.
+
+Efficiency and Security . Tab. 2 compares the operational efficiency and safety of APEX against three top-performing baselines. Our method achieves the lowest step latency (the time between consecutive actions), demonstrating that our Asynchronous Parallel Framework effectively boosts exploration efficiency. Furthermore, APEX attains the highest average safe distance, a measure of collision-free exploration capability, showing the enhanced navigation reliability provided by our RL-based Action Decision Module.
+
+4.3 Ablation Study
+
+Table 3 : Effect of the attraction-exploration trade-off parameter \alpha .
+
+\alpha SR \uparrow NE \downarrow OSR \uparrow SPL \uparrow 0.05 5.83 29.11 9.17 5.28 0.1 9.17 41.92 15.83 8.23 0.2 13.33 54.59 20.00 10.14 0.5 11.67 58.55 15.83 9.65 0.8 12.50 62.27 16.67 11.45 1.0 7.50 66.44 13.33 4.85
+
+To validate the contributions of key components in APEX, we conduct a series of ablation studies.
+
+First, we investigate the impact of the reward balancing parameter \alpha in our RL-based Action Decision Module. This parameter balances the agent’s tendency between exploitation and exploration ( Eq. 13 ). As shown in Tab. 3 , we evaluate various values for \alpha . The results indicate that an \alpha of 0.2 achieves the best overall performance, striking an optimal balance between attraction and exploration rewards.
+
+Next, we analyze the necessity of each core module, with results summarized in Tab. 4 . To verify the function of the 3D Dynamic Grid-based Map, we removed it and used raw RGB and depth images as direct observational inputs to the Action Decision Module. The model struggled to converge under this setting and achieved poor navigation performance. To assess the impact of the RL-based Action Decision Module, we replaced it with a reward-prediction-based heuristic algorithm. The details of this algorithm can be seen in Appendix C. Although this heuristic achieved acceptable results, its tendency to get trapped in local optima led to performance that was inferior to our original module. Finally, to demonstrate the importance of the Target Grounding Module, we replaced it with a simple rule to navigate towards the highest activation point in the attraction map, which led to a substantial drop in performance and underscored the necessity of our specialized mechanism for accurate target localization.
+
+Table 4 : Ablation Study of Core Modules.
+
+Method SR \uparrow NE \downarrow OSR \uparrow SPL \uparrow w/o 3D-Map 1.67 45.62 4.17 0.73 w/o RL-AD 12.50 42.08 19.17 10.11 w/o TG 5.00 48.33 9.17 4.17 APEX 13.33 54.59 20.00 10.14
+
+5 Conclusion
+
+In this study, we introduced APEX (Aerial Parallel Explorer), a novel agent for Aerial Object Goal Navigation. APEX features a hierarchical architecture consisting of three specialized modules: Dynamic Spatio-Semantic Mapping Module, RL-based Decision Making module, and Target Grounding module. These components are efficiently integrated through a novel Asynchronous Parallel Framework. Experimental results on the UAV-ON Benchmark demonstrate that APEX not only achieves state-of-the-art performance but also exhibits superior reliability and higher operational efficiency. In the future, we will conduct further research and optimization, including fine-tuning pre-trained VLM and MLLM models specifically for the Aerial ObjectNav task, as well as comparing the effects of different novel RL methods on APEX.
+
+Supplementary Material
+
+6 Algorithm Flow
+
+Algorithm 1 and Algorithm 2 illustrates the overall workflow of our agent. We employ a multi-process architecture to enable parallel execution of the three modules.
+
+Algorithm 1 Overall Workflow
+
+Input: Observations O Input: States S Input: Target Description D
+
+MEM denotes the shared information, including M_{\text{attr}} , M_{\text{expl}} , M_{\text{obst}} , and others.
+
+Algorithm 2 Memory Updating Workflow
+
+Input: Masks \mathcal{M} Input: Observations O Input: States S Input: Attraction Scores s
+
+7 More Visualization Results
+
+7.1 Cases
+
+We provide additional visualizations to further illustrate APEX’s performance. Fig. 8 shows four navigation episodes: three successful searches for ”Car”, ”Playground”, and ”Umbrella”, and one failure case targeting a ”Sandbox”. The failure was caused by a collision with a tree, which suggests a potential limitation in our Obstacle Map’s ability to detect sparse obstacles.
+
+7.2 Trajectories
+
+Fig. 6 demonstrates the complete trajectories for these four cases (labeled as Case 1-4), in addition to the main paper’s example (Case 0).
+
+8 Details of Heuristic Algorithm
+
+The heuristic algorithm mentioned in Ablation Study is detailed in Algorithm 3 . The core idea is to simulate each possible action, evaluate the potential reward based on attraction and exploration criteria, and select the action with the highest predicted reward.
+
+Algorithm 3 Heuristic Action Decision
+
+Input: Attraction Map M_{\text{attr}} Input: Exploration Map M_{\text{expl}} Input: Obstacle Map M_{\text{obst}} Input: Current State s
+
+Let a be an action from the action set \mathcal{A} .
+
+Let s^{\prime} be the hypothetical state after action a .
+
+The attraction reward R_{\text{attr}} and exploration reward R_{\text{expl}} is defined in main paper.
+
+9 More Training Details
+
+9.1 Offline Map Generation
+
+Directly incorporating the VLM for attraction map generation within the reinforcement learning loop is infeasible due to its high inference latency. To address this, we pre-generate a complete attraction map for each of the 36 tasks before training begins, which are shown in Fig. 7 .
+
+For each task, we designed a flight path to cover the entire relevant search area. An agent was simulated along this path to generate and store a full attraction map. During RL training, instead of calling the VLM, the agent identifies its currently visible grid cells via the depth map and populates its local attraction map by looking up the pre-computed values. This method bypasses the VLM’s latency, making the RL training process computationally available.
+
+Figure 5 : The architecture of policy network.
+
+Figure 6 : Complete trajectories of visualization examples.
+
+9.2 Policy Network Architecture
+
+Fig. 5 illustrates the architecture of the policy network in our RL-based Action Decision Module. It utilizes three CNNs to extract features from the Attraction, Exploration, and Obstacle maps, respectively. To process the 3D map data, the z-axis is treated as the channel dimension for the convolutional layers. The resulting feature vectors are concatenated and shared between an Actor (MLP) and a Critic (MLP) head. The Actor network outputs the final action policy. This implementation is based on the MultiInputPolicy architecture provided by the Stable-Baselines3 [ 29 ] .
+
+Figure 7 : Examples of collected attraction maps.
+
+Figure 8 : More visualized results. The first three examples are successful cases, with the targets ”Car”, ”Playground”, and ”Umbrella” respectively. The last one is a failure case, with the target being ”Sandbox”.

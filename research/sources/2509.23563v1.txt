@@ -1,0 +1,328 @@
+RAVEN: Resilient Aerial Navigation via Open-Set Semantic Memory and Behavior Adaptation
+
+Aerial outdoor semantic navigation requires robots to explore large, unstructured environments to locate target objects. Recent advances in semantic navigation have demonstrated open-set object-goal navigation in indoor settings, but these methods remain limited by constrained spatial ranges and structured layouts, making them unsuitable for long-range outdoor search. While outdoor semantic navigation approaches exist, they either rely on reactive policies based on current observations, which tend to produce short-sighted behaviors, or precompute scene graphs offline for navigation, limiting adaptability to online deployment. We present RAVEN , a 3D memory-based, behavior tree framework for aerial semantic navigation in unstructured outdoor environments. It (1) uses a spatially consistent semantic voxel-ray map as persistent memory, enabling long-horizon planning and avoiding purely reactive behaviors, (2) combines short-range voxel search and long-range ray search to scale to large environments, (3) leverages a large vision-language model to suggest auxiliary cues, mitigating sparsity of outdoor targets. These components are coordinated by a behavior tree, which adaptively switches behaviors for robust operation. We evaluate RAVEN in 10 photorealistic outdoor simulation environments over 100 semantic tasks, encompassing single-object search, multi-class, multi-instance navigation and sequential task changes. Results show RAVEN outperforms baselines by 85.25\% in simulation and demonstrate its real-world applicability through deployment on an aerial robot in outdoor field tests. Website: https://raven-semantic.github.io/
+
+
+
+Fig. 1 : We present RAVEN , a 3D open-set memory-based behavior tree framework for aerial semantic outdoor navigation. RAVEN not only navigates reliably toward detected targets, but also performs long-range reasoning to plan toward distant cues and continues informed search even when direct visual evidence is limited. It further supports multi-class object search and on-the-fly task switching within a mission.
+
+I INTRODUCTION
+
+Aerial robots are increasingly employed for autonomous exploration and search in outdoor environments. Prior research has largely focused on geometry-driven strategies, including frontier-based exploration [ 1 ] and volumetric information gain maximization [ 2 ] . While these methods efficiently cover the spaces, they rely on geometric representations–such as occupancy grids or volumetric maps–and cannot perform semantic reasoning, for example, locating a yellow car in urban areas or identifying machinery scattered across a construction site.
+
+Semantic navigation has been extensively studied in indoor environments [ 3 , 4 , 5 ] , where robots are tasked with reaching object goals or following language instructions. With the advent of foundation models, recent approaches have leveraged these models for open-set object navigation [ 6 , 7 , 8 ] . However, such methods remain largely confined to bounded 2D indoor settings [ 3 , 4 , 6 , 5 , 7 , 8 ] , where the spatial horizon is limited, the robot’s range of possible movements is constrained, and the structured environment provides cues for locating objects.
+
+By contrast, outdoor semantic navigation poses two major challenges compared to indoor settings. First, the much larger spatial extent of outdoor scenes requires long-range search strategies; second, the sparse distribution of target objects, combined with the absence of a structured hierarchy (e.g., building \rightarrow floor \rightarrow room \rightarrow object) demands careful strategic planning. Some prior methods [ 9 , 10 , 11 ] pursue map-free navigation with reactive policies that leverage short-term observation histories, which often generate short-sighted behaviors. Other works attempt semantic navigation in outdoor scenes using graph representations; however, they construct these graphs offline, which limits their online applicability [ 12 , 13 ] .
+
+We propose RAVEN , a R esilient A erial V oxel-Ray Memory E mpowered N avigation, a novel framework for outdoor semantic search. (1) RAVEN builds upon recent advances in open-set semantic voxel and ray representations [ 14 ] , leveraging them as persistent internal memory . This open-set voxel-ray memory not only avoids purely reactive behaviors and enables long-horizon planning, but also supports multi-class search and accommodates dynamic task switching, owing to its task-agnostic nature. (2) Beyond voxel-based search for close and reliable cues, RAVEN performs ray-based search to register and plan over long-range distance cues, thereby addressing the challenge of long-range reasoning in outdoor settings. (3) To overcome the semantic sparsity of outdoor scenes, it invokes a large vision language model (LVLM)-guided search when needed to incorporate auxiliary cues. These search behaviors are integrated through a behavior tree, which allows the system to adaptively select behaviors depending on situations and to maintain resiliency by switching strategies when one fails. We validate RAVEN in extensive simulation environments, and demonstrate its promising performance through real-robot deployment testing.
+
+In summary, our contributions are as follows:
+
+We present a new aerial semantic navigation framework that leverages an open-set voxel–ray memory as an internal representation of the world and employs a behavior tree to robustly adapt across multiple search behaviors.
+
+We address the challenges of long-range reasoning and sparse semantic cues via ray-based search and LVLM guidance within the behavior tree. Our method further supports multi-class search and on-the-fly task switching, an underexplored aspect of semantic navigation.
+
+We validate the framework by demonstrating superior performance over existing baselines across diverse tasks in simulation and further showcase its real-world feasibility through deployment on a physical robot.
+
+II RELATED WORKS
+
+Mobile robot autonomy spans diverse tasks, from exploration to navigation, and building on these foundations, recent works have explored the semantic navigation paradigm [ 3 , 4 , 5 ] , where robots understand and reason about semantic information in the environment, such as object types, language, and context, to guide their navigation.
+
+With the rise of Vision Foundation Models (VFMs) [ 15 ] and LVLMs [ 16 ] , semantic navigation has seen tremendous growth [ 17 , 18 ] . Tasks in semantic navigation include vision-language navigation (VLN) [ 19 , 17 , 20 ] , where a robot executes a vision-grounded language instruction to follow paths; object-goal navigation (OGN) [ 3 , 6 , 21 ] , where a robot locates and navigates toward objects based on their categories or descriptions; embodied question answering (EQA) [ 18 ] , where a robot actively explores to answer questions about the environment.
+
+In this work, we focus on object-goal navigation. While prior studies have primarily focused on indoor, ground robots, and single-object scenarios, we aim to explore OGN in outdoor settings, with aerial robots, and multi-class, multi-object scenarios–an important yet widely underexplored domain.
+
+II-A Classical Exploration and Search
+
+Early work on robotic exploration began with frontier-based methods using 2D occupancy grids [ 22 ] . Extensions to 3D aerial scenarios include frontier-based fast exploration [ 1 ] and sampling-based approaches driven by information gain [ 2 ] . While these methods have shown strong performance in real-world deployments, their primary focus is on mapping and covering unknown areas, often neglecting semantic information. Recent efforts [ 23 ] employ aerial robots to explore regions and attempt to detect target objects. However, they treat object discovery merely as a byproduct of map coverage rather than performing object-goal-driven planning. In contrast, RAVEN leverages open-set semantic voxel-ray memory and LVLM to guide planning, while retaining the robustness of traditional methods when semantic guidance is insufficient.
+
+II-B Map-free Semantic Navigation
+
+Building on the success of vision language models (VLMs) and multi-modal LLMs, recent works explored zero-shot semantic navigation that uses semantic priors to interpret observations and directly generate control commands. Early approaches relied on contrastive VLMs such as CLIP [ 15 ] to sequentially guide the robot [ 7 ] . Later works leverage LLMs’ reasoning capabilities [ 24 ] and emphasize incorporating memory to go beyond reactive planning, e.g., by buffering past FPV frames [ 20 , 10 ] or maintaining textual summaries of past observations and actions [ 17 ] . This map-free paradigm has also been applied to VLN [ 9 , 10 ] and OGN [ 11 ] in aerial robotics.
+
+However, the FPV-based map-free paradigm typically produces discrete control commands, bypassing motion continuity and showing limitations in collision avoidance. Moreover, relying on latest frames or heuristically selected history suffers from information loss [ 17 ] , limiting applicability to long-horizon planning. In contrast, our approach leverages a 3D spatially grounded open-set semantic memory that efficiently aggregates in-range and out-of-range observations into a persistent internal representation, enabling long-horizon planning.
+
+Fig. 2 : Overview of RAVEN . From image, depth, and pose inputs, the mapper builds an open-set 3D semantic voxel-ray map that serves as persistent memory. A behavior tree adapts the robot’s actions: it performs semantic voxel-based search when reliable cues exist within depth range, switches to semantic ray-based search when only long-range directional hints are available, invokes an LVLM to suggest auxiliary objects when no target is visible, and defaults to frontier-based exploration if all strategies fail.
+
+II-C Map-based Semantic Navigation
+
+To address limitations of LLMs’ spatial reasoning [ 25 ] and support longer-term observation storage, many works adopt spatial mapping approaches. In these methods, semantic information from observations is encoded and aggregated into either: (1) dense representations, such as 2D bird’s eye view (BEV) grids–often combined with semantically scored frontier maps [ 6 , 3 , 4 , 5 ] –or 3D voxel grids [ 26 , 14 ] ; or (2) graph-based representations, including scene graphs that associate semantics with scene entities [ 27 , 28 , 29 ] .
+
+Graph-based approaches have a lower memory footprint but are often computationally expensive to construct, with many generated offline before use [ 26 , 27 , 28 , 29 , 12 , 13 ] . Furthermore, their heuristic-driven graph structures typically assume regular indoor layouts, making them difficult to generalize to outdoor environments [ 30 ] . Similarly, 2D BEV-based approaches [ 6 , 3 , 4 , 5 , 8 ] , while capable of online guidance, are largely applied to indoor ground-robot scenarios, assuming constrained spatial ranges and hierarchical indoor structures.
+
+Recently, RayFronts [ 14 ] introduced a real-time, online mapping framework that generates a dense semantic representation using a single forward pass. It encodes in-range observations as voxels and out-of-range observations as rays, enabling object localization given a fixed trajectory and explicit queries . We leverage this representation as a memory to actively guide an aerial robot toward goal objects and generate reasoning-based queries via an LVLM, enabling the system not only to navigate toward targets, but also to strategically identify auxiliary cues to support efficient search.
+
+III METHOD
+
+The core of RAVEN is a behavior tree that adapts search behaviors, leveraging a 3D open-set semantic voxel-ray representation as a memory. We first provide a brief overview of the voxel-ray mapping, and then focus on behavior modules in detail. The overall pipeline is illustrated in Figure 2 .
+
+III-A Preliminary: Open-Set Semantic Voxel-Ray Mapping
+
+We build upon the encoder and the open-set 3D voxel and ray mapping pipeline from RayFronts [ 14 ] . Specifically, at each timestep t the robot receives an RGB image I_{t} and depth measurement D_{t} . The encoder E processes the image to produce vision-language aligned features \mathbf{f}_{t}=E(I_{t}) . From the depth sensor, we construct a set of 3D occupancy voxels O_{t} and detect frontier regions \mathcal{F}_{t} . The image features are projected onto the voxel grid, resulting in semantic voxels:
+
+V_{t}=\textsc{Project}(\mathbf{f}_{t},O_{t}). (1)
+
+In parallel, we cast outward rays from \mathcal{F}_{t} , and similarly project the features \mathbf{f}_{t} onto them, yielding semantic rays:
+
+R_{t}=\textsc{RayProject}(\mathbf{f}_{t},\mathcal{F}_{t}). (2)
+
+Rays serve to encode semantic information beyond the depth coverage, complementing V_{t} . Unlike a frontier f\in\mathcal{F}_{t} , which is represented as a single 3D point, each ray r_{i}\in R_{t} has its own 3D origin and directional vector. Multiple rays may share the same frontier as their origin, with each ray pointing a different direction. These directions are computed via image projection, preserving accurate orientation. Rays also provide a much sparser representation than the full set of image observations, enabling efficient encoding of distant semantic cues.
+
+III-B RAVEN : Behavior Tree for Resilient Adaptation
+
+This subsection presents our main contribution: a set of modular behaviors for 3D aerial outdoor semantic navigation. We describe each module, and conclude by explaining how they are integrated into a single behavior tree architecture.
+
+Initialization: At the beginning of each episode, the robot takes off from its starting location and ascends to 5\text{m} . As in [ 6 ] , it also performs a 360^{\circ} rotation in its place to obtain a holistic view of the environment. This step ensures a consistent start across trials and sufficient altitude for safe exploration.
+
+Frontier-based Exploration: The aerial robot defaults to frontier-based exploration when no relevant semantic cues are available. Frontiers \mathcal{F}_{t} are clustered using DBSCAN with parameters \epsilon and min_samples , yielding a set of frontier centroids C . Each centroid is scored by a weighted combination of its distance from the robot’s position and a momentum-based penalty for sharp heading changes. The centroid with the lowest score is then selected as the next waypoint.
+
+Semantic Voxel-based Search: As the robot explores, information captured in the RGB images and falls within the depth range is stored in semantic voxels V_{t} . Each voxel v\in V_{t} contains a semantic feature \mathbf{f}(v) produced by RayFronts encoder. For comparison with target object classes, we adapt these features into the SIGLIP embedding [ 31 ] space. For a given task, we compute the cosine similarity between SIGLIP-adapted voxel feature \tilde{\mathbf{f}}(v) and the SIGLIP embedding of each target object class query \mathbf{q}_{j} (e.g., SIGLIP(“water tower”)):
+
+s(v,\mathbf{q}_{j})=\frac{\tilde{\mathbf{f}}(v)\cdot\mathbf{q}_{j}}{\|\tilde{\mathbf{f}}(v)\|\,\|\mathbf{q}_{j}\|},\hskip 10.00002ptj=1,\dots,J (3)
+
+where J is number of object classes in the task. Because multiple text queries can be evaluated in parallel, this formulation naturally supports multi-class navigation. Voxels exceeding a similarity threshold \epsilon_{\text{vox}} are retained:
+
+V_{\text{filtered}}=\{v\in V_{t}\mid\exists~j~~s.t.~s(v,\mathbf{q}_{j})>\epsilon_{\text{vox}}\} (4)
+
+To approximate object-level regions, connected component labeling (CCL) is applied to V_{\text{filtered}} , grouping adjacent voxels into clusters while filtering out small outliers.
+
+\{C_{1},\dots,C_{N}\}\leftarrow\textsc{CCL}(V_{\text{filtered}})\hskip 10.00002pt~s.t.~|C_{n}|\geq\tau_{\text{min}} (5)
+
+These clusters serve as candidate object hypotheses and are visited sequentially, starting from the closest. For safe navigation, a global waypoint is set just outside the cluster’s bounding box, offset outward by \Omega .
+
+Semantic Ray-based Search: While V_{t} stores information about nearby objects, outdoor navigation often requires reasoning about objects that lie far beyond the depth range. To capture such long-range cues, we employ semantic rays R_{t} , which encodes information about distant objects that are briefly visible in the RGB images but outside depth coverage.
+
+A set of rays R_{t}=\{r_{1},..,r_{N}\} is cast outward in multiple directions beyond the current frontiers \mathcal{F}_{t} . Each ray r_{i} is associated with semantic features \mathbf{f}(r_{i}) , which is adapted to SIGLIP embeddings \tilde{\mathbf{f}}(r_{i}) . For a given task, we compute cosine similarity between the ray features \tilde{\mathbf{f}}(r_{i}) and the SIGLIP embedding features of the text queries \mathbf{q}_{j} corresponding to the target objects:
+
+s(r_{i},\textbf{q}_{j})=\frac{\tilde{\mathbf{f}}(r_{i})\cdot\mathbf{q}_{j}}{\|\tilde{\mathbf{f}}(r_{i})\|\|\mathbf{q}_{j}\|} (6)
+
+Rays with similarity above a threshold \epsilon_{ray} form the subset:
+
+R_{\text{filtered}}=\{r_{i}\in R_{t}|\max_{j}s(r_{i},\textbf{q}_{j})\geq\epsilon_{\text{ray}}\} (7)
+
+When R_{\text{filtered}}\neq\emptyset , ray-based search is initiated. The rays in R_{\text{filtered}} are grouped into angular bins \{B_{1},B_{2},...,B_{K}\} . Each group B_{k} is scored using a weighted combination of proximity \phi_{\text{prox}}(B_{k}) and density \phi_{\text{dens}}(B_{k}) :
+
+Score(B_{k})=\alpha\cdot\phi_{\text{prox}}(B_{k})+\beta\cdot\phi_{\text{dens}}(B_{k}) (8)
+
+The robot selects the highest-scoring B_{k} as a global waypoint.
+
+As the robot follows selected rays and approaches the object, semantic voxels naturally begin to form, at which point the system transitions smoothly into voxel-based search for more precise localization (Fig. 3 ). This ray-based search enables long-range reasoning beyond what voxels alone can achieve and provides additional benefit–it introduces a persistent memory: once observed, an object’s information remains encoded in the rays even if it is no longer visible in the current image. This motivates our next discussion on memory.
+
+Fig. 3 : (a) When no information exists within depth range, the robot activates semantic ray navigation for long-range coarse search, using ray features where the tower was briefly captured in the RGB view. (b) As it follows the rays and approaches the target, voxels naturally form and the search transitions to precise voxel-based navigation.
+
+Task-Agnostic 3D Voxel-Ray Memory: Together, the semantic voxels V_{t} and semantic rays R_{t} constitute a unified spatial-semantic memory that accumulates observations over time without overwriting earlier data. This persistent representation explicitly encodes both geometry and semantics, enabling long-horizon planning in large, unstructured environments.
+
+A key feature of our approach is that the voxel-ray memory is task-agnostic, distinguishing it from approaches that rely on task-conditioned 3D maps. In task-conditioned methods, even open-vocabulary models still require a predefined set of tasks (object types or queries) to guide the mapping process. In contrast, our memory is task-agnostic, meaning that no predefined queries are needed during mapping, and the task can even change on the fly. When a new task arises, the robot can align the new query with the existing voxel-ray memory using a similarity score to select relevant voxels and rays.
+
+Fig. 4 : Open-set semantic voxel-ray map serves as memory. When the first task (“radio tower”) is given, the robot navigates toward it. Upon introduction of a second task (“bridge”), it queries the existing memory and uses highlighted cues to guide search. Yellow voxels and rays indicate task-relevant highlights.
+
+This property makes our method particularly suitable for online mapping. As illustrated in Figure 4 , while the robot is creating a semantic voxel-ray memory to locate the first task object (e.g., a radio tower), it can seamlessly handle a new task introduced midway (e.g., a bridge) without rebuilding the map. Instead, it simply compares the new query to the existing memory and identifies the most relevant voxels and rays.
+
+LVLM-guided Search: While semantic voxels and rays capture information within and beyond the depth sensor range, both can fail if the target objects never appear, even briefly, in any RGB images. To handle such cases, we introduce an additional search strategy guided by an LVLM. At sparse intervals T_{\mathrm{lvlm}} , the LVLM is queried with the current image I_{t} and a prompt \mathcal{P} , producing auxiliary objects aux_{j} that are semantically related to the targets.
+
+\{aux_{j}\}_{j=1}^{J_{\text{aux}}}\leftarrow\textsc{LVLM}(\mathcal{P},I_{t}) (9)
+
+These auxiliary cues are converted into additional text queries and fused into the ray-based search, enabling the robot to pursue contextual objects as guidance toward the target.
+
+\displaystyle Q \displaystyle=\{\mathbf{q}_{j}\}_{j=1}^{J}\cup\{\mathbf{q}_{aux_{j}}\}_{j=1}^{J_{\text{aux}}} (10) \displaystyle s(r_{i},\textbf{q}_{j}) \displaystyle=\frac{\tilde{\mathbf{f}}(r_{i})\cdot\mathbf{q}_{j}}{\|\tilde{\mathbf{f}}(r_{i})\|\,\|\mathbf{q}_{j}\|},\hskip 10.00002ptr_{i}\in R,\;\mathbf{q}_{j}\in Q
+
+The remaining procedure follows the standard ray-based search strategy. We employ InternVL3-2B [ 16 ] as the LVLM.
+
+Behavior Tree Integration: To coordinate the navigation modules, we use a behavior tree (BT) that structures modular behaviors and ensures robust execution. After initialization, control proceeds through a priority-based sequence:
+
+Semantic voxel-based search: prioritized first, as nearby objects within depth range provide the most reliable cues.
+
+Semantic ray-based search: used when voxel cues are insufficient, using distant observations for long-range coarse guidance.
+
+LVLM-guided search: provides auxiliary cues from sparse LVLM queries when needed.
+
+Frontier-based exploration: fallback strategy to maintain coverage of unexplored regions when semantic cues are unavailable.
+
+This modular BT design offers two key benefits: (i) it enables autonomous selection of the most suitable behavior for each state, and (ii) it guarantees resilience and robustness by sequentially activating alternative strategies when one fails.
+
+III-C Local Trajectory Planning
+
+For local trajectory planning and collision avoidance, we use DROAN [ 32 ] , a disparity-based algorithm that inflates the configuration space around detected obstacles in the disparity image. The local planner selects the best path from a library of candidate trajectories and, given a global waypoint, generates a collision-free trajectory toward the target.
+
+IV SIMULATION EXPERIMENTS
+
+Fig. 5 : Ten simulation environments used for evaluation.
+
+IV-A Simulator, Environments, and Experiment Setup
+
+We conduct photorealistic robot simulation using NVIDIA Isaac Sim. Since no standard benchmark exists for outdoor semantic navigation, we design ten environments: one digital twin of a real-world site and nine designed simulated scenes. To introduce a variety of conditons, each environment is tested with three starting poses. The ten simulation environments are shown in Fig. 5 . We deploy our custom aerial robot autonomy stack in these environments. The robot model is based on the Spirit platform from Ascent Aerosystems, and all experiments are run on an NVIDIA RTX 6000 Ada GPU.
+
+Fig. 6 : (a) Trajectories of RAVEN (red), VLFM-3D (blue), FPV+LVLM (green) for finding fuel tanks. FPV+LVLM relies on recent views and reactive policies, producing a meandering path. VLFM-3D uses a value map but chases momentary maxima, yielding myopic behavior. RAVEN leverages semantic rays for long-range reasoning, generating an efficient path. (b) RAVEN trajectory for locating cafe tables and bankomats. Starting with empty memory and failing voxel-ray search, the robot invokes LVLM, which suggests sidewalks and building as auxiliary cues for bankomats. Following rays pointing sidewalk, it finds the bankomats, turns back, spots and navigates to the cafe tables.
+
+IV-B Tasks
+
+Unlike prior works that typically consider single-OGN tasks, our task formulation generalizes to multi-class, multi-instance settings, as well as sequential task scenarios.
+
+Type I: Single-Class Tasks: All target instances belong to a single class c\in\mathcal{C} :
+
+\mathcal{G}=\{g_{m}\mid g_{m}\text{ of class }c,\;m=1,\dots,M\},\hskip 10.00002ptc\in\mathcal{C}
+
+This includes either a single instance ( M=1 ) or multiple instances ( M>1 ) of that class.
+
+Type II: Multi-Class Tasks: Target instances span multiple classes \mathcal{C}_{\text{target}}\subseteq\mathcal{C} :
+
+\mathcal{G}=\bigcup_{c\in\mathcal{C}_{\text{target}}}\{g_{m}\mid g_{m}\text{ of class }c\}
+
+The agent must navigate to all instances in these classes.
+
+Type III: Sequential Dual-Class Tasks: Target classes are revealed sequentially. Let \mathcal{G}_{1} and \mathcal{G}_{2} denote the first and second class instances, respectively. The robot must first find at least one instance of \mathcal{G}_{1} ; once found, \mathcal{G}_{2} is revealed.
+
+\mathcal{G}=\mathcal{G}_{1}\cup\mathcal{G}_{2},\hskip 10.00002pt\text{with }\mathcal{G}_{2}\text{ revealed after first $\mathcal{G}_{1}$ is found}
+
+This task evaluates the robot’s ability to exploit internal maps and past observations to quickly search for the second class.
+
+IV-C Metrics
+
+Single-OGN is commonly evaluted by Success Rate (SR) –whether the robot reaches the goal within budget–and its path-efficiency variant Success weighted by Path Length (SPL) [ 3 , 5 , 6 ] . In multi-OGN tasks, however, a binary success criterion fails to capture partial completion. We therefore adopt the Progress and Progress weighted by Path Length (PPL) metrics, introduced in [ 21 ] .
+
+Progress: Let a task specify M target object goals \mathcal{G}=\{g_{1},\dots,g_{M}\} (each instance counts separately). If the robot reaches K of them within the budget, we define
+
+\text{Progress}=\frac{K}{M}.
+
+In the single-object case, this reduces to the standard SR.
+
+Progress weighted by Path Length (PPL): Let p be the length of the executed trajectory up until the K -th distinct goal is reached (set PPL =0 if K=0 ). PPL normalizes progress by trajectory length p and compares it to the optimal path length d_{K} visiting the best subset of K goals in the best order.
+
+\text{PPL}\;=\;\frac{d_{K}}{p}\cdot\frac{K}{M}.
+
+In single OGN, PPL reduces to standard SPL.
+
+IV-D Baselines
+
+We select three baseline categories for comparison: one representing classical exploration and search, one representing map-free semantic navigation, and one representing map-based semantic navigation as the state-of-the-art baseline.
+
+Frontier-3D [ 23 ] : A classical frontier-based exploration method, extended to 3D aerial robot settings.
+
+FPV+LVLM: A map-free semantic navigation approach that maintains a short history of recent FPV frames and prompts LVLM [ 16 ] to output discrete action commands.
+
+VLFM-3D [ 6 ] : A 3D extension of the SOTA 2D BEV online OGN method, VLFM. The image encoder and local planning are adopted from our approach.
+
+We also ablate the impact of each component of our method:
+
+Semantic Voxels: Excludes rays and LVLM to assess the effect of ignoring long-range observation encoding
+
+Semantic Rays: Excludes voxels and LVLM to assess the impact of lacking precise in-range localization
+
+Semantic Voxels + Rays: Uses both voxels and rays but no LVLM to measure the benefit of auxiliary cues.
+
+IV-E Comparison to Baseline Methods
+
+TABLE I : Comparison of RAVEN with baselines. Progress and PPL are reported for each task type.
+
+Task Type I (40 tasks) Task Type II (30 tasks) Task Type III (30 tasks) All Tasks (100 tasks) Progress(%) PPL(%) Progress(%) PPL(%) Progress(%) PPL(%) Progress(%) PPL(%) Frontier-3D [ 23 ] 6.33 3.18 4.95 2.52 3.33 2.09 5.02 2.66 FPV+LVLM [ 16 ] 17.09 7.19 11.88 5.57 8.33 3.32 12.91 5.54 VLFM-3D [ 6 ] 35.34 19.79 27.59 15.48 24.45 10.78 29.75 15.79 RAVEN 54.19 37.28 42.08 25.04 52.78 31.55 50.14 31.89
+
+TABLE II : Ablation results of RAVEN . Progress and PPL are reported for each task type.
+
+Task Type I (40 tasks) Task Type II (30 tasks) Task Type III (30 tasks) All Tasks (100 tasks) Progress(%) PPL(%) Progress(%) PPL(%) Progress(%) PPL(%) Progress(%) PPL(%) Semantic Voxels (No Rays, LVLM) 19.26 11.92 12.52 8.21 12.22 7.64 14.63 9.52 Semantic Rays (No Voxels, LVLM) 39.75 28.76 30.77 17.13 41.67 20.52 34.47 22.81 Semantic Voxels + Rays (No LVLM) 50.05 34.55 38.87 22.99 53.89 30.83 47.85 29.96 RAVEN (Sem Voxels + Rays + LVLM) 54.19 37.28 42.08 25.04 52.78 31.55 50.14 31.89
+
+Fig. 7 : (a) Robot hardware design (b) Front view of compute and camera payloads (c) RAVEN ’s real-robot navigation trajectories toward the water tower (light blue), red building (red), and the frontier-based exploration trajectory (yellow), and their first-person, ground view images.
+
+We compare the performance of RAVEN with all baselines. RAVEN achieves the best performance across all three task types, followed by the map-based VLFM-3D, then the map-free FPV+LVLM, while the non-semantic frontier-based exploration performs worst, as shown in Table I . In particular, RAVEN delivers 68.5% relative improvement in Progress and 102% relative improvement in PPL over VLFM-3D.
+
+Figure 6 (a) illustrates single-class navigation to fuel tanks from the same start position with three methods. The map-free FPV+LVLM relies only on recent FPV frames and LVLM prompts; without a consistent map it produces a reactive, meandering path, resulting in low efficiency. VLFM-3D benefits from a value map obtained by projecting similarity scores onto frontiers, which allows eventual goal finding; however, its motion remains myopic, repeatedly chasing the momentary maximum in the value map and yielding an unstable trajectory. In contrast, RAVEN activates semantic rays as soon as the fuel tank is briefly captured in an RGB image and travels nearly straight to the goal, producing a highly efficient path.
+
+Figure 6 (b) showcases a multi-class task and the role of LVLM. The robot is tasked to find cafe tables and bankomats, neither initially encoded in voxels or rays. Invoking LVLM search suggests additionally seeking sidewalk and building to find the bankomats; incorporating these cues into ray-search quickly guides the robot to the bankomats located on the sidewalk near a building. The robot then reorients and discovers the cafe tables through voxel-ray search.
+
+IV-F Ablation Studies
+
+We perform ablation studies on each component of RAVEN , with results in Table II . For Task Types I and II, the full model consistently outperforms all ablated variants, confirming the benefit of every component. For Task Type III, the semantic voxel+ray configuration achieves slightly higher Progress (within the margin of error), indicating that LVLM is less critical when sequential goal changes mainly test memory from voxels and rays. In contrast, LVLM auxiliary cues clearly aid in Task Types I and II.
+
+Overall, semantic rays contribute more strongly than voxels by providing long-range guidance when objects are far away in large scenes, while voxels alone struggle to reason over long distances. Nevertheless, voxel search remains essential for precise localization near a target. Moreover, false positives in ray search can be particularly detrimental, as they may mislead the robot over long distances. These results indicate that voxels and rays are complementary, and both are necessary.
+
+V REAL-ROBOT EXPERIMENTS
+
+V-A Hardware Design
+
+We use an aerial robot based on the Ascent Aerosystems Spirit platform, equipped with custom payloads. These include an NVIDIA Jetson AGX Orin for onboard computation and a ZED X camera providing RGB and depth for online mapping. Due to unreliable onboard pose estimation, we use GPS odometry. The robot components are shown in Figure 7 (a), and the Orin AGX and ZED X payloads is shown in Figure 7 (b).
+
+V-B Experiments and Results
+
+We conducted real-world experiments using onboard computing with semantic voxel-ray online mapping and RAVEN , while leaving onboard LVLM integration for future work. Field tests took place at a firefighter training site. RAVEN was evaluated on two tasks—finding a water tower (beyond depth perception range) and finding a red building—and, for reference, a frontier-based exploration run was also conducted without a specific target. Since no oracle path exists in the real environment, the PPL metric is not applicable; instead, we report qualitative outcomes, trajectory lengths, average flight speed, and real-time mapping rates. The frontier-based method achieved a total flight distance of 40.46\text{m} with an average speed of 1.29\text{m/s} , but wandered without purposeful heading. Using RAVEN , the robot incrementally built a semantic voxel-ray memory and navigated toward the water tower and red building, as shown in Figure 7 (c). The trajectory lengths for the two tasks were 74.97\text{m} and 42.72\text{m} , respectively, with an average flight speed of 1.21\text{m/s} . The onboard mapping module operated in real time at an average rate of 4.8\text{Hz} .
+
+VI CONCLUSION
+
+We present RAVEN , a resilient behavior tree framework for aerial semantic navigation in outdoor environments. It uses an open-set semantic voxel-ray memory to enable strategic, long-horizon planning. RAVEN combines semantic voxel search for precise nearby localization, semantic ray search for long-range reasoning, and LVLM-guided search to mitigate sparse targets. We validate RAVEN through extensive simulation experiments and demonstrate its real-world applicability with initial aerial robot deployments.
+
+ACKNOWLEDGMENTS
+
+This work was supported by Defense Science and Technology Agency (DSTA) under Contract #DST000EC124000205. Omar Alama is partially funded by King Abdulaziz
+University. We thank Andrew Jong for his dedicated contributions to the development of the core autonomy stack.
+
+A1. Contribution Statement
+
+Seungchan Kim led the research and developed the behavior tree architecture and algorithms. Implemented baselines, benchmarks, and evaluation scripts, conducted simulation experiments, ablation studies, and real-robot deployment and field tests, and wrote the majority of the paper.
+
+Omar Alama contributed extensively to the conceptual design of the planner and evaluation framework. Helped optimize and integrate the RayFronts voxel-ray memory, surveyed and helped write related works, and provided feedback on figures and paper writing.
+
+Dmytro Kurdydyk imported scenes into the Isaac Sim simulator, annotated environments for benchmarking, and helped integrate large vision–language models into the system.
+
+John Keller optimized local trajectory planning and obstacle avoidance algorithms, and assisted with real-robot deployment and field tests.
+
+Nikhil Keetha contributed to early discussions, helped brainstorm the pipeline, and assisted with paper writing.
+
+Wenshan Wang provided feedback on the research direction, assisted with benchmarking in Isaac Sim, and offered guidance on writing.
+
+Yonatan Bisk contributed to shaping the early research direction, advised on the use of large vision–language models, and provided writing feedback.
+
+Sebastian Scherer supervised the overall project, guided the research direction, participated in discussions and real-world deployment, and provided feedback on the paper writing, figures, and videos.
+
+A2. Algorithm Details
+
+Here we detail the algorithmic procedures of each component of behavior tree architecture.
+
+Algorithm 1 RAVEN Behavior Tree
+
+Algorithm 2 Semantic Voxel Search
+
+Algorithm 3 Semantic Ray Search
+
+Algorithm 4 LVLM-Guided Search
+
+Algorithm 5 Frontier-based Exploration
+
+A3. LVLM Prompt
+
+Appendix A1 LVLM Prompt
+
+The exact prompt used for the LVLM is shown below:
+
+A4. Hyperparameters for Experiments
+
+Here we list the hyperparameters used for both the simulation and real-robot experiments. For the encoder and mapper of RayFronts, any hyperparameters not specified here follow the default settings of [ 14 ] . Likewise, any hyperparameters not detailed for the real-robot experiments are identical to those used in the simulation.
+
+TABLE A.1 : Simulation Experiment Hyperparameters
+
+parameter value Image(RGB,Depth) Resolution 448x448 Maximum Depth Range 30m Frame skip 10 \text{Frontier DBSCAN}\hskip 10.00002pt\epsilon 2.7 \text{Frontier DBSCAN}\hskip 10.00002ptmin\_samples 3.0 \text{Frontier vertical threshold}\hskip 10.00002ptz_{\mathrm{thresh}} 1.5m \text{Frontier distance weight}\hskip 10.00002pt\alpha_{\mathrm{dist}} 1.0 \text{Frontier heading change weight}\hskip 10.00002pt\alpha_{\mathrm{head}} 5.0 Voxel size 0.5m \text{Voxel filtering threshold}\hskip 10.00002pt\epsilon_{\text{vox}} 0.98 \text{Voxel cluster outlier threshold}\hskip 10.00002pt\tau_{\text{min}} 30 \text{Voxel cluster bounding box outward offset}\hskip 10.00002pt\Omega 1.0 \text{Ray filtering threshold}\hskip 10.00002pt\epsilon_{\text{ray}} 0.95 \text{Ray binning angle threshold}\hskip 10.00002pt\theta_{\text{thresh}} 45^{\circ} \text{Ray proximity parameter}\hskip 10.00002pt\alpha 1.0 \text{Ray density parameter}\hskip 10.00002pt\beta 5.0 \text{Ray waypoint parameter}\hskip 10.00002pt\Omega_{\mathrm{ray}} 6.0 \text{LVLM invoke period}\hskip 10.00002ptT_{\mathrm{lvlm}} 20s \text{LVLM number of auxiliary objects}\hskip 10.00002ptJ_{\mathrm{aux}} 3
+
+TABLE A.2 : Real-Robot Experiment Hyperparameters
+
+parameter value Maximum Depth Range 20m \text{Frontier vertical threshold}\hskip 10.00002ptz_{\mathrm{thresh}} 4m \text{Ray filtering threshold}\hskip 10.00002pt\epsilon_{\text{ray}} 0.7 \text{Ray waypoint parameter}\hskip 10.00002pt\Omega_{\mathrm{ray}} 8.0
+
+A5. Simulation Environments and Tasks Detail
+
+Here we describe the tasks for each simulation environment. Task I is a single-class object-goal navigation task, Task II is a multi-class object-goal navigation task, and Task III is a sequential dual-class task-switching navigation task.
+
+TABLE A.3 : Environments and Tasks
+
+Environment Tasks Fire Academy Task I : “water tower”, “radio tower”, “green container”, “fuel tank”, Task II : “water tower, fuel tank”, “radio tower, blue container”, “red container, water tower” Task III : “water tower \rightarrow radio tower”, “radio tower \rightarrow fuel tank”, “green container \rightarrow water tower” Neighborhood Task I : “blue container”, “bus stop”, “yellow car”, “house”, Task II : “bus stop, blue container”, “red container, yellow car, billboard”, “tunnel, blue container, red car” Task III : “bus stop \rightarrow blue container”, “yellow car \rightarrow billboard”, “blue container \rightarrow tunnel” Construction Site Task I : “blue tarp”, “orange towercrane”, “cabling winches”, “bio toilet”, Task II : “orange towercrane, forklift”, “construction lift, asphalt roller”, “blue tarp, bio toilet, yellow towercrane” Task III : “blue tarp \rightarrow orange towercrane”, “orange towercrane \rightarrow blue tarp”, “cabling winches \rightarrow bio toilet” Abandoned Factory Task I : “white silo”, “water tower”, “pipe”,“building” Task II : “water tower, pipe”, “white silo, building”, “building, pipe” Task III : “water tower \rightarrow white silo”, “building \rightarrow white silo”, “white silo \rightarrow pipe” Abandoned City Task I : “building”, “car”, “bus stop”, “yellow motorhome” Task II : “yellow motorhome, car”, “car, bus stop”, “bus stop, yellow motorhome” Task III : “building \rightarrow car”, “car \rightarrow bus stop”, “bus stop \rightarrow car” Snowy Village Task I : “human”, “bridge”, “pond”,“car” Task II : “tower, car”, “human, outhouse”, “outhouse, pond” Task III : “pond \rightarrow tower”, “tower \rightarrow bridge”, “outhouse \rightarrow car” Downtown West Task I : “fountain”, “fire hydrant”, “food cart”, “trash bin” Task II : “food cart, trash bin”, “fountain, food cart”, “fountain, trash bin” Task III : “fountain \rightarrow food cart”, “trash bin \rightarrow fountain”, “food cart \rightarrow fountain” Modern City Downtown Task I : “obelisk”, “yellow truck”, “cafe table”, “bankomat” Task II : “obelisk, yellow truck”, “cafe table, bankomat”, “bankomat, yellow truck” Task III : “cafe table \rightarrow obelisk”, “obelisk \rightarrow bankomat”, “yellow truck \rightarrow cafe table” Military Base Task I : “radio tower”, “helicopter”, “ATV”,“bridge” Task II : “radio tower, guard tower”, “helicopter, radio tower, mobile radar”, “radio tower, bridge, helicopter” Task III : “guard tower \rightarrow helicopter”, “radio tower \rightarrow bridge”,“bridge \rightarrow guard tower” Shipyard Task I : “ship”, “crane”, “silo”,“ship construction” Task II : “ship, crane”, “ship silo”, “ship construction, crane” Task III : “crane \rightarrow ship”, “ship \rightarrow silo”,“silo \rightarrow ship”
+
+A6. Implementation Details on Baselines
+
+VLFM-3D : Since the original VLFM was proposed only in a 2D version in prior work [ 6 ] , we extended it to a 3D version to fit our setting. Fortunately, we already have a 3D frontier set \mathcal{F}_{t} . We projected the encoder features onto each frontier point to construct a 3D cosine-similarity value map. As mentioned earlier, the image encoder and the local trajectory planning for obstacle avoidance were implemented using our own method, so that we could isolate and test the efficacy of the 3D value map component only. The robot moves toward the frontier point with the highest score in the value map.
+
+FPV+LVLM : As mentioned earlier, we used InternVL3-2B [ 16 ] as the backbone. We stored the most recent 5 image frames in an image-frame memory and the most recent 200 timesteps of poses in a pose memory. Based on the recent first-person-view images, we prompted the LVLM to choose one of three actions: move forward, turn left, or turn right. Once an action was selected, local planning to reach the corresponding waypoint was carried out using our method.
+
+A7. Ablation Figures: Voxel vs. Ray Search
+
+Here we additionally report two figures comparing the trajectories of the ablated components: semantic voxel search only and semantic ray search only. Figures 8 and 9 visualize the differences between the two methods in scenarios where the robot navigate to houses in the Neighborhood and buildings in the Abandoned City environments, respectively (semantic voxel search only: yellow, semantic ray search only: red).
+
+As shown in these figures, the voxel-based search performs short-range, reliable navigation by visiting the nearest detected objects one by one. It provides precise localization but is less effective at covering long distances within the given time. In contrast, the ray-based search tends to pursue faraway objects within its long-range field of view, producing generally straighter trajectories, but it often skips nearby targets. This highlights the need for both components in RAVEN .
+
+Fig. 8 : Comparison of semantic voxel search and ray search in the Neighborhood environment, where the goal is to navigate to houses.
+
+Fig. 9 : Comparison of semantic voxel search and ray search in the Abandoned City environment, where the goal is to navigate to buildings.

@@ -1,0 +1,440 @@
+RefineFly: Failure-Aware Post-Training for
+Aerial Vision-Language Navigation
+
+Unmanned aerial vehicle vision-language navigation (UAV-VLN) requires agents to translate visual observations and language instructions into reliable flight actions in complex environments. Although recent end-to-end UAV vision-language-action (UAV-VLA) policies reduce reliance on separately designed perception, planning, and control modules, their behavior-cloning objectives provide limited supervision for errors arising during closed-loop execution. Reinforcement learning (RL) offers a promising solution, while limited interaction budgets, long-tailed scene distributions, and policy drift complicate sustained learning. To this end, we propose RefineFly, a failure-aware RL post-training framework for end-to-end UAV-VLA policies. Built on token-level proximal policy optimization (PPO), RefineFly maintains dynamic failure memory within a two-stage scene curriculum to sustain learning from unresolved tasks as training shifts from empirical to balanced scene sampling. Throughout this process, stage-specific reference regularization constrains policy deviation. Experiments on the TravelUAV benchmark demonstrate that RefineFly outperforms all comparison methods across all three splits, improving success rate over AerialVLA by 3.12 to 8.37 percentage points with a total rollout budget of about 30% of the training-set size. Moreover, ablations reveal that the benefits of sustained failure learning vary across evaluation splits, while the two-stage scene curriculum improves overall performance, highlighting the importance of training distributions when learning from failures.
+
+
+
+Introduction
+
+Vision-language navigation (VLN) requires embodied agents to associate natural-language instructions with visual observations and execute trajectories toward semantic goals ( Anderson et al., 2018 ; Krantz et al., 2020 ) . Unmanned aerial vehicle (UAV) VLN extends this problem to large-scale three-dimensional (3D) environments, where an aerial agent searches for a language-described object while continuously adjusting forward motion, altitude, yaw, and termination decisions ( Liu et al., 2023 ; Fan et al., 2023 ; Wang et al., 2025 ) . Recent vision-language-action (VLA) models provide a promising end-to-end interface from onboard observations and instructions to executable controls, reducing reliance on separately engineered perception, planning, and control modules ( Zitkovich et al., 2023 ; Kim et al., 2025 ; Xu et al., 2026 ) .
+
+However, behavior-cloned UAV-VLA policies receive limited supervision for errors arising during their own closed-loop execution. Existing UAV-VLN systems improve long-horizon navigation through waypoint prediction, hierarchical planners, memory mechanisms, or external perception modules ( Wang et al., 2025 ; Zhang et al., 2025a ; Ding et al., 2026 ; Ning et al., 2026 ; Jiang et al., 2025 ) . Although end-to-end policies such as AerialVLA ( Xu et al., 2026 ) generate flight actions directly, their training relies on expert demonstrations that provide limited coverage of error-induced states ( Ross et al., 2011 ) . Consequently, rapidly changing viewpoints, occlusion, and long trajectories can cause local errors to compound into collisions, navigation drift, premature landing, or timeouts. These failures expose diverse forms of unsuccessful behavior and provide feedback for further policy improvement. Accordingly, online reinforcement learning (RL) post-training offers a way to refine the pretrained policy using rewards from its own navigation outcomes.
+
+Figure 1: Comparison of training paradigms for UAV-VLN. RefineFly sustains online learning from unresolved tasks through dynamic failure memory, with fresh rollouts informing both policy updates and the memory lifecycle.
+
+Nevertheless, exploiting this feedback effectively requires careful organization of post-training. Specifically, long navigation rollouts involve repeated simulation and VLA inference, making extensive online interaction costly. Within a limited budget, ordinary task sampling may provide few opportunities to continue learning from unresolved failures. Moreover, uneven scene distributions further restrict these opportunities in environments with relatively few training tasks ( Lin et al., 2025 ; Gao et al., 2026 ) . Consequently, post-training needs to reconcile adaptation under the existing task distribution with broader training coverage of rare scenes. Meanwhile, changes in the selected failure cases and scene distribution can shift the focus of policy updates, potentially weakening previously acquired navigation capabilities. These challenges motivate sustained failure learning together with stage-wise distribution adaptation and constraints on policy deviation.
+
+To address these challenges, we propose RefineFly, a failure-aware online post-training framework for end-to-end UAV-VLA policies, as illustrated in Fig. 1 . Built on token-level proximal policy optimization (PPO) ( Schulman et al., 2017 ) , RefineFly sustains learning from unresolved tasks through dynamic failure memory within a two-stage scene curriculum. As training shifts from empirical to balanced scene sampling, the framework expands learning opportunities for rare scenes while constraining policy deviation through reference regularization. This design supports continued learning from closed-loop failures and navigation generalization under a finite online interaction budget.
+
+The main contributions of this paper are as follows.
+
+RL Post-Training for End-to-End UAV-VLA. We adapt RL post-training to end-to-end VLA policies for UAV-VLN and empirically study the influence of training distributions and sampling strategies in online post-training, together with the benefits and trade-offs of sustained learning from failure experiences.
+
+Failure-Aware Online Post-Training Framework. We propose RefineFly, which integrates dynamic failure memory with lifecycle management into a two-stage scene curriculum built on token-level PPO. This design sustains learning from failures across stage-specific training distributions while using reference regularization to mitigate policy drift.
+
+Navigation Performance and Generalization. Experiments demonstrate that RefineFly outperforms the compared baselines across all evaluation splits, with substantial gains on challenging long-horizon navigation tasks.
+
+Related Work
+
+VLN for UAVs
+
+Early VLN methods established cross-modal instruction grounding and action prediction ( Anderson et al., 2018 ; Krantz et al., 2020 ) . AerialVLN ( Liu et al., 2023 ) and AVDN ( Fan et al., 2023 ) extended this setting to outdoor aerial navigation and dialog-conditioned target search, while UAV-ON ( Xiao et al., 2025 ) and OpenFly ( Gao et al., 2026 ) broadened it toward open-world object goals and larger-scale aerial datasets. To execute long-horizon flights, TravelUAV ( Wang et al., 2025 ) predicts continuous waypoints, whereas CityNavAgent ( Zhang et al., 2025c ) , SkyVLN ( Li et al., 2025 ) , TypeFly ( Chen et al., 2025 ) , and training-free VLM approaches ( Hu et al., 2025 ) combine language reasoning with memory, trajectory generation, model-based control, or program synthesis. Moreover, NavFoM ( Zhang et al., 2025a ) and LongFly ( Jiang et al., 2025 ) further improve generalization through large-scale pretraining and spatiotemporal modeling. These methods substantially improve semantic planning, while most retain explicit interfaces between high-level reasoning and low-level flight execution, through which prediction and control errors can accumulate.
+
+VLA Policies for UAV-VLN
+
+RT-2 ( Zitkovich et al., 2023 ) and OpenVLA ( Kim et al., 2025 ) show that robotic actions can be represented in language-compatible output spaces, allowing pretrained vision-language representations to support embodied control. This paradigm has been extended to fine-grained imitation, racing, and cognitive UAV control ( Wang et al., 2026 ; Serpiva et al., 2025 ; Lykov et al., 2025 ) . Furthermore, AerialVLA ( Xu et al., 2026 ) maps onboard observations and linguistic prompts directly to continuous 3-degree-of-freedom (DoF) controls and an intrinsic landing decision, reducing reliance on oracle waypoints, external detectors, and separate landing modules. However, these UAV-VLA policies are trained mainly by supervised behavior cloning, which provides limited coverage of states induced by autonomous execution errors ( Ross et al., 2011 ) . Consequently, closed-loop failures motivate further policy improvement through online feedback.
+
+RL Post-Training for Aerial VLN
+
+Interactive RL post-training has been explored directly in language-conditioned UAV control. SuReAL ( Blukis et al., 2019 ) combines supervised position prediction with RL-based continuous control and evaluates the resulting policy on a physical quadcopter. More recently, HTNav ( Fan et al., 2026 ) integrates staged imitation and RL with tiered decision making for urban aerial VLN. OpenVLN ( Lin et al., 2025 ) studies policy adaptation under data scarcity using value-based waypoint rewards and KL-regularized updates, while FlightGPT ( Cai et al., 2025 ) combines supervised fine-tuning with reward-based refinement for goal accuracy, reasoning quality, and output compliance. These studies establish the value of interaction feedback, reward design, and staged optimization for improving aerial navigation. Building on this direction, our work studies how sustained learning from failed tasks interacts with scene sampling during end-to-end UAV-VLA post-training. Accordingly, RefineFly maintains dynamic failure memory throughout a two-stage scene curriculum to support continued policy improvement under uneven scene coverage.
+
+Method
+
+Overview
+
+We propose RefineFly, a failure-aware online RL post-training framework for end-to-end VLA policies in UAV-VLN, as illustrated in Fig. 2 . Using token-level PPO as the optimization backbone, RefineFly preserves the original autoregressive textual action interface. During online learning, the framework maintains a dynamic failure memory to sustain learning from unresolved tasks while retaining fresh task sampling from the underlying training distribution. Building on this process, a two-stage curriculum shifts training from the original long-tailed distribution toward a more balanced distribution, providing more training opportunities for tasks in rare scenes and enabling further learning from the associated failures. Throughout this process, policy updates are regularized against a reference policy frozen within each stage to mitigate policy drift as the failure memory and training distribution evolve.
+
+Figure 2: Overview of RefineFly. RefineFly sustains learning from unresolved tasks through dynamic failure memory within a two-stage curriculum that rebalances the training distribution across scenes. Token-level PPO updates the policy through the original autoregressive textual action interface, with updates regularized against a reference policy frozen within each stage.
+
+Policy Interface and Optimization Backbone
+
+Textual Action Interface.
+
+We consider end-to-end UAV-VLN control and adapt the UAV-VLA policy to RL fine-tuning through its existing autoregressive textual action interface. Specifically, at time step t , the instruction x and visual observation o_{t} form the context h_{t}=(x,o_{t}) , from which the policy generates an action-token sequence \mathbf{z}_{t}=(z_{t,1},\ldots,z_{t,K_{t}}) of length K_{t} according to
+
+\pi_{\theta}(\mathbf{z}_{t}\mid h_{t})=\prod_{k=1}^{K_{t}}\pi_{\theta}(z_{t,k}\mid h_{t},z_{t,<k}). (1)
+
+Following AerialVLA ( Xu et al., 2026 ) , three uniformly quantized control tokens represent forward progression, vertical movement, and yaw adjustment, followed by an optional LAND token. A deterministic decoder then maps valid sequences to continuous commands \mathbf{a}_{t}=\langle\Delta x_{t},\Delta z_{t},\Delta\psi_{t}\rangle .
+
+Variable-length action-token sequences require PPO updates to account for both valid token positions and executable command formats.
+Specifically, unmasked padding can contribute to the loss, and unnormalized token sums can overweight longer commands. Accordingly, we pad sequences to a maximum length K , apply a mask m_{t,k}\in\{0,1\} to select valid action-token positions, and normalize the loss by M_{t}=\max(1,\sum_{k=1}^{K}m_{t,k}) . Meanwhile, the same action grammar constrains generation and likelihood computation. Any remaining parsing failure produces a safe no-op and receives an invalid-action penalty.
+
+Token-Level PPO Backbone.
+
+Sequence-level PPO applies a shared clipping decision to the joint probability ratio of an autoregressive action sequence. Consequently, a probability change at one token position can activate clipping and suppress policy-gradient contributions from other positions. Accordingly, we adopt token-level PPO as the optimization backbone, applying probability ratios and clipping separately at each valid action-token position. Here, all valid tokens within a command share the action-level advantage \widehat{A}_{t} . For the rollout policy \pi_{\mathrm{old}} , the token probability ratio is
+
+\rho_{t,k}(\theta)=\frac{\pi_{\theta}(z_{t,k}\mid h_{t},z_{t,<k})}{\pi_{\mathrm{old}}(z_{t,k}\mid h_{t},z_{t,<k})}. (2)
+
+To incorporate closed-loop navigation feedback into token-level updates, we compute the shared action-level advantage from rollout rewards and value estimates. During training, a value head V_{\phi}(h_{t}) provides these estimates and is optimized using the standard clipped PPO value loss \mathcal{L}_{V} . With \bar{\rho}_{t,k}(\theta)=\operatorname{clip}(\rho_{t,k}(\theta),1-\epsilon,1+\epsilon) , the masked policy objective is
+
+J_{\mathrm{PPO}}^{\mathrm{token}}(\theta)=\mathbb{E}_{t}\!\left[\frac{1}{M_{t}}\sum_{k=1}^{K}m_{t,k}\min\!\left(\rho_{t,k}(\theta)\widehat{A}_{t},\bar{\rho}_{t,k}(\theta)\widehat{A}_{t}\right)\right], (3)
+
+where \epsilon is the clipping threshold. Appendix G reports an empirical comparison supporting this backbone choice. These interface and optimization adaptations enable direct RL fine-tuning of the pretrained VLA policy while preserving the original action interface.
+
+Failure-Aware Curriculum under Scene Imbalance
+
+The optimization backbone learns from both successful and failed trajectories, while sustained improvement also depends on the training opportunities available across tasks and scenes. Although event-based penalties provide diverse failure feedback, ordinary task sampling may offer limited opportunities for further training on the associated tasks. Moreover, long-tailed scene distributions make such opportunities particularly scarce in rare scenes. To address these limitations, RefineFly sustains learning from unresolved tasks through a dynamic failure memory within a two-stage curriculum that shifts training toward a more balanced scene distribution.
+
+Dynamic Failure Memory.
+
+Compared with the terminal success reward, event-based failure penalties provide feedback on a broader range of navigation outcomes. Specifically, collisions, stalled motion, persistent movement away from the target, premature landing, and timeouts reflect distinct forms of unsuccessful execution. To incorporate this diverse feedback into policy optimization, RefineFly integrates event-specific rewards and penalties with dense distance progress, defining the rollout reward as
+
+r_{t}={}\operatorname{clip}\!\left(\kappa_{p}(D_{t-1}-D_{t}),r_{\min}^{\mathrm{prog}},r_{\max}^{\mathrm{prog}}\right)+\sum_{e\in\mathcal{E}}R_{e}\mathbb{I}[e_{t}=e], (4)
+
+where D_{t} denotes the Euclidean distance to the target, \kappa_{p} scales the progress reward, and r_{\min}^{\mathrm{prog}} and r_{\max}^{\mathrm{prog}} are its clipping bounds. The set \mathcal{E}=\{\texttt{success},\allowbreak\texttt{collision},\allowbreak\texttt{stuck},\allowbreak\texttt{away},\allowbreak\texttt{early-stop},\allowbreak\texttt{timeout}\} contains the navigation events, and R_{e} specifies the reward or penalty associated with event e . Standard generalized advantage estimation (GAE) ( Schulman et al., 2016 ) uses these rewards and the value estimates V_{\phi}(h_{t}) to compute the action-level advantages \widehat{A}_{t} for token-level PPO.
+
+To sustain learning from these diverse failure signals across rollouts, RefineFly maintains a dynamic failure memory \mathcal{M}_{u}=\{\xi_{i}\} that evolves with online training. Specifically, each task record is represented as
+
+\xi_{i}=(\omega_{i},c_{i},f_{i},\sigma_{i},n_{i}), (5)
+
+where the entries denote the task initialization, scene, failure type, status, and unsuccessful retry count, respectively.
+Initially, the memory contains failed tasks collected with the initial policy. When an unresolved record is selected, the current policy generates a complete new trajectory from \omega_{i} . After each attempt, a successful task is marked as solved and excluded from further selection, while n_{i} is incremented after a failed attempt. To limit repeated unsuccessful trials, the record is marked as dropped and excluded when n_{i} reaches N_{\max} . Meanwhile, failures from fresh sampling enter the memory as unresolved records, including previously solved or dropped tasks that fail again.
+
+Two-Stage Scene Curriculum.
+
+To sustain learning from failures while increasing training opportunities for rare scenes, we organize online post-training into a two-stage scene curriculum. Specifically, Stage I follows the empirical scene distribution, while Stage II continues from the final Stage I policy with balanced scene sampling. The overall scene allocations are defined as
+
+P_{1}(c)=\frac{N_{c}}{\sum_{c^{\prime}\in\mathcal{C}}N_{c^{\prime}}},\qquad P_{2}(c)=\frac{1}{|\mathcal{C}|}, (6)
+
+where \mathcal{C} denotes the training scenes, and N_{c} is the number of tasks in scene c . For scenes with insufficient tasks, repeated sampling fills the Stage II quota.
+
+Both stages reserve a fixed fraction of rollouts for unresolved tasks in the dynamic failure memory while preserving the prescribed scene distribution. Specifically, q_{s,u} denotes the task sampling distribution at iteration u of stage s\in\{1,2\} , with scene distribution P_{s} . Within this allocation, a fraction \eta of rollouts is assigned to unresolved tasks in \mathcal{M}_{u} , and the remaining rollouts use fresh task sampling. The current policy executes the selected tasks, and navigation outcomes update the memory through the same lifecycle. Under the rebalanced distribution of Stage II, tasks in rare scenes receive more training opportunities, allowing additional failures to enter the memory and support subsequent learning. Appendix A.1 specifies the scene quotas and sampling procedure.
+
+Reference-Constrained Policy Updates
+
+Although the failure-aware curriculum strengthens learning from failures and aims to improve generalization under scene imbalance, changes in the training distribution may induce policy drift and weaken previously acquired navigation capabilities. To limit this drift, we adopt reference-policy Kullback-Leibler (KL) regularization. Specifically, the reference policy \pi_{\mathrm{ref}}^{(s)} remains frozen throughout each training stage s\in\{1,2\} . In the two-stage curriculum, Stage I uses the initial VLA policy as \pi_{\mathrm{ref}}^{(1)} and Stage II uses the final Stage I policy as \pi_{\mathrm{ref}}^{(2)} to anchor adaptation to the rebalanced scene distribution.
+
+The reference penalty measures policy deviation at valid action-token positions. Specifically, let p_{\theta,t,k}(\cdot)=\pi_{\theta}(\cdot\mid h_{t},z_{t,<k}) and p_{\mathrm{ref},t,k}^{(s)}(\cdot)=\pi_{\mathrm{ref}}^{(s)}(\cdot\mid h_{t},z_{t,<k}) denote the corresponding token distributions. Using the mask and normalization defined in the optimization backbone, the reference loss is given by
+
+\mathcal{L}_{\mathrm{KL}}^{(s)}=\mathbb{E}_{t}\!\left[\frac{1}{M_{t}}\sum_{k=1}^{K}m_{t,k}D_{\mathrm{KL}}\!\left(p_{\theta,t,k}\,\|\,p_{\mathrm{ref},t,k}^{(s)}\right)\right]. (7)
+
+The final objective combines the policy, value, and reference terms using trajectories collected under the failure-aware curriculum. Specifically, with task initializations sampled according to q_{s,u} , the loss is given by
+
+\mathcal{L}(\theta,\phi)=-J_{\mathrm{PPO}}^{\mathrm{token}}(\theta)+c_{v}\mathcal{L}_{V}(\phi)+\beta\mathcal{L}_{\mathrm{KL}}^{(s)}, (8)
+
+where c_{v} weights value regression and \beta controls the reference penalty. Thus, the scene curriculum specifies the overall scene distribution, while token-level PPO and reference regularization govern policy updates at valid action-token positions.
+
+Experiments
+
+Experimental Setup
+
+Dataset.
+
+We evaluate RefineFly on the TravelUAV dataset ( Wang et al., 2025 ) under the UAV-Need-Help setting adopted by AerialVLA. Specifically, we use 7922 training trajectories and evaluate on 1418 Seen, 958 Unseen Map, and 629 Unseen Object trajectories. Following the benchmark settings, trajectories shorter than 250 meters are classified as easy, and the remainder as hard. We report results on the full test set and both difficulty subsets for each split. The training set exhibits a long-tailed scene distribution, as detailed in Appendix E .
+
+Metrics.
+
+We evaluate navigation accuracy, task completion, and path efficiency using navigation error (NE), success rate (SR), oracle success rate (OSR), and success weighted by path length (SPL). Specifically, NE measures the final Euclidean distance to the destination. SR measures successful termination within the target region, including a correct LAND output or near-zero movement for 10 consecutive steps. OSR records whether the executed trajectory ever enters that region, while SPL accounts for both task completion and path efficiency. Lower NE and higher SR, OSR, and SPL indicate better performance.
+
+Implementation Details.
+
+RefineFly post-trains the AerialVLA initialization through online interaction while preserving its action interface. Specifically, AerialVLA combines the OpenVLA-7B ( Kim et al., 2025 ) backbone with a LoRA ( Hu et al., 2022 ) adapter, and post-training optimizes the adapter together with an added value head using simulator-derived rewards. Counting both fresh and memory-selected task executions, the total rollout budget is approximately 30% of the training-set size. Training uses 8 \times NVIDIA A100 (80GB) GPUs and takes about 21 hours. We implement RefineFly using RLinf ( Yu et al., 2025 ) , AirSim ( Shah et al., 2017 ) , the TravelUAV environment, and the AerialVLA action-token pipeline. Appendix E provides the remaining training configurations.
+
+Baselines.
+
+We compare RefineFly with heuristic controls, task-specific UAV-VLN methods, generalist navigation models, and an end-to-end VLA baseline, which either rely on fixed policies, specialized planning modules, or behavior-cloning-based training. For all baselines, we report results from the corresponding publications on the same evaluation splits.
+
+Heuristic Methods. Random Action samples controls without using visual or language inputs, while Fixed Action executes predefined commands.
+
+Task-Specific UAV-VLN Models. CMA ( Anderson et al., 2018 ) is a recurrent cross-modal navigation baseline, while TravelUAV ( Wang et al., 2025 ) combines multimodal features with hierarchical trajectory decoders and an external target detector. TravelUAV-DA extends TravelUAV by aggregating additional corrective trajectories.
+
+Generalist Navigation Models. NavFoM ( Zhang et al., 2025a ) uses a navigation foundation model with a dedicated trajectory-planning head, and LongFly ( Jiang et al., 2025 ) introduces explicit spatiotemporal modeling for long-horizon UAV navigation.
+
+End-to-End VLA Baseline. AerialVLA ( Xu et al., 2026 ) autoregressively generates action tokens for UAV control, and its checkpoint initializes RefineFly, making their comparison a direct evaluation of RL post-training.
+
+Table 1: Comparison on the Test Seen set. RefineFly reports mean and standard deviation over three evaluation seeds. NE is in meters, and the other metrics are percentages. Bold and underline indicate the best and second-best results, respectively. Shading marks RefineFly. Human performance is for reference only.
+
+Method Full Easy Hard NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow Human 14.15 94.51 94.51 77.84 11.68 95.44 95.44 76.19 17.16 93.37 93.37 79.85 Random Action 222.20 0.14 0.21 0.07 142.07 0.26 0.39 0.13 320.12 0.00 0.00 0.00 Fixed Action 188.61 2.27 8.16 1.40 121.36 3.48 11.48 2.14 270.69 0.79 4.09 0.49 CMA 135.73 8.37 18.72 7.90 84.89 11.48 24.52 10.68 197.77 4.57 11.65 4.51 TravelUAV-DA 98.66 17.45 48.87 15.76 66.40 20.26 51.23 18.10 138.04 14.02 45.98 12.90 NavFoM 93.05 29.17 49.24 25.03 58.98 32.91 53.16 27.87 143.83 23.58 43.40 20.80 LongFly 60.02 36.39 65.87 31.07 38.10 38.52 71.90 31.24 85.20 33.94 58.94 30.88 AerialVLA 65.88 47.96 57.69 38.54 43.76 49.30 61.30 37.14 93.16 46.30 53.23 40.26 RefineFly 54.96 56.33 65.40 45.98 37.60 56.28 67.39 42.91 76.36 56.38 62.94 49.75 (Ours) \pm\,1.19 \pm\,0.15 \pm\,0.80 \pm\,1.13 \pm\,1.31 \pm\,0.48 \pm\,0.98 \pm\,0.58 \pm\,1.07 \pm\,0.88 \pm\,0.59 \pm\,1.80
+
+Table 2: Comparison on the Test Unseen Map set. RefineFly reports mean and standard deviation over three evaluation seeds. NE is in meters, and the other metrics are percentages. Bold and underline indicate the best and second-best results, respectively. Shading marks RefineFly.
+
+Method Full Easy Hard NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow Random Action 202.98 0.00 0.00 0.00 158.46 0.00 0.00 0.00 265.88 0.00 0.00 0.00 Fixed Action 180.47 0.52 2.61 0.39 132.89 0.89 4.28 0.67 247.72 0.00 0.25 0.00 CMA 141.68 2.30 10.02 2.16 102.29 3.57 14.26 3.33 197.35 0.50 4.03 0.50 TravelUAV 138.80 4.18 20.77 3.84 102.94 4.63 22.82 4.24 189.46 3.53 17.88 3.28 NavFoM 125.10 6.30 18.95 5.68 102.41 6.77 20.07 6.04 170.58 5.36 15.71 4.97 LongFly 108.32 11.27 30.27 9.32 78.56 12.96 34.31 10.32 148.10 9.02 24.88 7.98 AerialVLA 67.42 37.58 52.92 28.22 44.99 41.89 58.47 29.72 99.11 31.49 45.09 26.11 RefineFly 58.88 42.97 60.09 31.83 44.02 46.88 63.04 32.44 79.88 37.45 55.92 30.98 (Ours) \pm\,2.09 \pm\,1.76 \pm\,1.01 \pm\,1.25 \pm\,0.99 \pm\,1.24 \pm\,0.37 \pm\,0.72 \pm\,4.95 \pm\,2.65 \pm\,2.27 \pm\,2.05
+
+Table 3: Comparison on the Test Unseen Object set. RefineFly reports mean and standard deviation over three evaluation seeds. NE is in meters, and the other metrics are percentages. Bold and underline indicate the best and second-best results, respectively. Shading marks RefineFly.
+
+Method Full Easy Hard NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow Random Action 260.14 0.16 0.16 0.16 174.10 0.48 0.48 0.48 302.96 0.00 0.00 0.00 Fixed Action 212.84 3.66 9.54 2.16 151.66 6.70 13.88 3.72 243.29 2.14 7.38 1.38 CMA 155.79 9.06 16.06 8.68 102.92 14.83 22.49 13.90 182.09 6.19 12.86 6.08 TravelUAV 118.11 22.42 46.90 20.51 86.12 24.40 49.28 22.03 134.03 21.43 45.71 19.75 NavFoM 108.04 29.83 47.99 27.20 70.51 32.54 50.72 29.54 133.01 28.03 46.18 25.64 LongFly 66.74 43.87 64.56 38.39 54.84 38.01 56.84 31.36 57.07 50.25 74.16 45.27 AerialVLA 61.45 56.60 64.86 46.61 45.72 56.94 64.11 43.76 69.27 56.43 65.24 48.03 RefineFly 53.42 59.72 68.31 51.34 35.49 63.80 72.09 50.97 62.34 57.70 66.43 51.52 (Ours) \pm\,0.97 \pm\,0.81 \pm\,1.66 \pm\,0.77 \pm\,1.94 \pm\,1.20 \pm\,2.41 \pm\,1.58 \pm\,0.52 \pm\,1.45 \pm\,1.95 \pm\,1.02
+
+Performance Comparison
+
+Performance on Seen Environments.
+
+As shown in Table 1 , RefineFly improves closed-loop navigation over AerialVLA on the test seen set, with larger gains on Hard trajectories across all four metrics. Specifically, Full-set SR increases by 8.37 percentage points, and the gain reaches 10.08 points on the Hard subset. Moreover, Hard-set SPL improves by 9.49 points. The stronger gains on long trajectories are consistent with dynamic failure memory providing repeated opportunities to refine behavior on failed tasks, where local execution errors can prevent eventual completion.
+
+Generalization to Unseen Maps.
+
+As shown in Table 2 , RefineFly improves navigation over AerialVLA on unseen maps, increasing Full-set SR by 5.39 percentage points. Unlike the Easy subset, where NE changes only slightly, Hard-set NE decreases by 19.23 m, suggesting improved navigation over long routes, where execution errors can accumulate. Moreover, the concurrent gains in OSR and SR show that RefineFly improves both target-region reachability and successful completion on unseen maps. These gains are consistent with scene rebalancing giving less frequent scenes more training opportunities, while reference regularization limits policy deviation during continued failure learning.
+
+Generalization to Unseen Objects.
+
+As shown in Table 3 , RefineFly achieves the best Full-set results across all four metrics. Specifically, SR reaches 59.72\% , and SPL improves by 4.73 percentage points over AerialVLA. On Hard trajectories, LongFly achieves lower NE and higher OSR, whereas RefineFly obtains higher SR and SPL. The higher completion metrics are consistent with sustained learning from execution feedback, where penalties for collisions and premature landing may help refine navigation and termination behavior for unfamiliar objects.
+
+Table 4: Incremental ablation of RefineFly using evaluation seed 1. ID 1 uses token-level PPO, and ID 4 is the full framework. Checkmarks denote enabled components. Values are full-split SR (%) and its unweighted mean across splits, with absolute changes from AerialVLA in parentheses. Bold and underline mark the best and second-best results. Shading marks RefineFly.
+
+Framework Components Success Rate (%) ID Failure Memory Reference KL Two-Stage Curriculum Seen Unseen Map Unseen Object Avg. - - - - 47.96 37.58 56.60 47.38 1 \times \times \times 48.17 (+0.21\,\uparrow) 42.90 (+5.32\,\uparrow) 56.44 (-0.16\,\downarrow) 49.17 (+1.79\,\uparrow) 2 \checkmark \times \times 56.21 (+8.25\,\uparrow) 31.21 (-6.37\,\downarrow) 59.78 (+3.18\,\uparrow) 49.07 (+1.69\,\uparrow) 3 \checkmark \checkmark \times 55.01 (+7.05\,\uparrow) 37.47 (-0.11\,\downarrow) 62.32 (+5.72\,\uparrow) 51.60 (+4.22\,\uparrow) 4 \checkmark \checkmark \checkmark 56.28 (+8.32\,\uparrow) 44.89 (+7.31\,\uparrow) 60.41 (+3.81\,\uparrow) 53.86 (+6.48\,\uparrow)
+
+Table 5: Scene sampling comparison using full-split SR (%) with evaluation seed 1. Uniform Sampling uses equal scene quotas in one stage, while Original Distribution retains empirical proportions across two stages. RefineFly shifts from empirical to balanced sampling. Bold and underline mark the best and second-best results. Shading marks RefineFly.
+
+Sampling Strategy Seen Unseen Map Unseen Object Avg. Uniform Sampling 50.71 41.23 52.31 48.08 Original Distribution 56.13 40.92 59.14 52.06 Two-Stage Curriculum 56.28 44.89 60.41 53.86
+
+Ablation Study
+
+We conduct ablation studies to investigate how sustained failure learning interacts with reference regularization and scene sampling across all test splits. Specifically, all ablations use evaluation seed 1. Table 4 incrementally adds components to the token-level PPO backbone, while Table 5 compares scene sampling schedules. Appendices F and G analyze failure-memory outcomes and compare token-level and sequence-level PPO.
+
+Effect of RL Post-Training and Dynamic Failure Memory.
+
+As shown in Table 4 , the average performance improvement gained from using only token-level PPO is relatively limited, and the gains are uneven across different evaluation splits. Compared with AerialVLA, the token-level PPO baseline (ID 1) leaves Seen SR nearly unchanged, improves Unseen Map SR by 5.32 percentage points, and reduces Unseen Object SR by 0.16 points. The average gain of 1.79 percentage points supports policy refinement through online feedback, while the uneven changes motivate examining how failure-learning opportunities are distributed during post-training.
+
+Furthermore, dynamic failure memory improves performance on some evaluation splits while exposing a generalization trade-off. Specifically, ID 2 increases Seen and Unseen Object SR by 8.04 and 3.34 points relative to ID 1, whereas Unseen Map SR decreases by 11.69 points. Repeated current-policy rollouts provide fresh feedback on unresolved tasks, supporting further adaptation to previously unsuccessful navigation conditions. However, the unchanged empirical scene allocation does not increase the relative training share of rare scenes. These results suggest that continued task-specific practice can improve navigation in familiar scenes while leaving transfer to unseen maps limited, motivating further reference constraints and scene rebalancing.
+
+Effect of Reference-Policy KL Regularization.
+
+Reference-policy KL regularization partially offsets the generalization loss associated with failure-focused training. As can be seen in Table 4 , ID 3 improves Unseen Map SR by 6.26 percentage points and average SR by 2.53 points relative to ID 2, while Seen SR decreases by 1.20 points. Anchoring updates to the stage-initial policy discourages large policy deviations during repeated training on unresolved tasks. The improvement on unseen maps and reduction on seen environments are consistent with tempering task-specific adaptation to support transfer. However, Unseen Map SR remains below the token-level PPO baseline, leaving an unresolved trade-off for the scene curriculum to address.
+
+Effect of the Two-Stage Curriculum.
+
+The two-stage curriculum further improves average performance by changing the scene allocation under which failure learning continues. As shown in Table 4 , ID 4 improves Unseen Map and average SR by 7.42 and 2.26 percentage points relative to ID 3, with a 1.91 -point decrease in Unseen Object SR. Balanced sampling in Stage II gives rare scenes more opportunities for both fresh interaction and continued failure learning, offering a plausible explanation for the gain on unseen maps. Furthermore, as illustrated in Table 5 , RefineFly outperforms uniform sampling and the two-stage original-distribution baseline on all three splits. Relative to the latter, Unseen Map and average SR increase by 3.97 and 1.80 points, respectively. These results support a strategy of initial optimization based on empirical distributions followed by scene rebalancing, suggesting that sustained failure learning benefits from how training opportunities are allocated across stages.
+
+Conclusions
+
+We present RefineFly, a failure-aware post-training framework that sustains learning from closed-loop failures through dynamic failure memory within a two-stage scene curriculum built on token-level PPO. With a total rollout budget of about 30% of the training-set size, RefineFly outperforms all comparison methods across all three splits, improving the SR of AerialVLA by 3.12 to 8.37 percentage points. Beyond these gains, our findings indicate that failure experience provides valuable opportunities for policy improvement, while its benefits vary across evaluation splits under an imbalanced training distribution. Moreover, shifting from empirical to balanced scene sampling improves generalization and outperforms uniform sampling from the outset, highlighting the importance of how training opportunities are distributed when learning from failures. Extending this evaluation to additional benchmarks and real-world flights is an important direction for future work.
+
+Appendix
+
+This supplementary material details the scene distribution, training configuration, dynamic failure memory, and additional analyses of RefineFly. Section E specifies the data and optimization settings. Section F describes navigation events, memory outcomes, and paired task-level performance changes. Section G compares token-level and sequence-level PPO, while Section H presents a representative navigation case.
+
+Appendix A Detailed Experimental Settings
+
+This section reports the training-set composition and optimization configuration used for RefineFly.
+
+Dataset
+
+Benchmarks for Aerial Agents.
+
+Existing benchmarks for aerial agents and UAV-VLN cover complementary levels of perception, reasoning, and control. AerialVLN ( Liu et al., 2023 ) and AVDN ( Fan et al., 2023 ) established outdoor instruction-following and dialog-conditioned navigation, while UAV-ON ( Xiao et al., 2025 ) extended evaluation to open-world object-goal search. More recent benchmarks emphasize either data scale or high-level cognition, with OpenFly ( Gao et al., 2026 ) providing diverse trajectories based on predefined flight-action primitives, SpatialSky-Bench ( Zhang et al., 2025b ) assessing aerial spatial intelligence, and UAVBench ( Ferrag et al., 2025 ) evaluating mission-level reasoning.
+
+Our study requires closed-loop interaction with executable flight actions and explicit navigation feedback. Accordingly, we adopt TravelUAV ( Wang et al., 2025 ) , which provides target-oriented navigation with continuous trajectories and evaluation splits covering seen scenes, unseen maps, and unseen objects. Moreover, TravelUAV provides the training and evaluation setting for AerialVLA ( Xu et al., 2026 ) , whose end-to-end VLA policy maps onboard observations and linguistic prompts to continuous 3-DoF controls and an intrinsic landing decision. This alignment supports evaluating online post-training in the environment and action space used by the behavior-cloned initialization.
+
+Training-Set Distribution.
+
+The TravelUAV training set exhibits a pronounced imbalance across its 19 scenes. Specifically, Fig. 8 reports 7922 training samples, of which 7611 belong to 11 common scenes and account for 96.07% of the total. The remaining 311 samples span 8 rare scenes and account for only 3.93%. Furthermore, the largest scene contains 1545 samples, while the rare-scene counts range from 17 to 59. We define the rare-scene set as
+
+\mathcal{R}=\{c\in\mathcal{C}\mid N_{c}<100\}, (9)
+
+where N_{c} denotes the number of training samples associated with scene c .
+
+Figure 3: Training sample counts across the 19 TravelUAV scenes used by the UAV-Need-Help task.
+
+Two-Stage Scene Sampling.
+
+The two-stage curriculum changes the overall scene allocation while retaining failure-memory sampling within each stage. Specifically, Stage I follows the empirical scene distribution shown in Fig. 8 , while Stage II assigns an equal quota of 100 selections to each scene. Within these scene allocations, a fraction \eta of rollouts is assigned to unresolved tasks in dynamic failure memory, and the remainder uses fresh task sampling. For fresh sampling, tasks are selected without replacement while unused tasks remain available, followed by sampling with replacement when needed to fill the allocation. Consequently, a complete Stage II quota cycle contains 1900 selections, including 800 from rare scenes. The rare-scene share thus increases from 3.93% under the empirical distribution to 42.11%, providing more opportunities for both fresh interaction and continued learning from failures in these scenes.
+
+Table 6: Training and evaluation parameters for RefineFly.
+
+Parameter Value Model and Optimization LoRA rank r 64 LoRA scaling \alpha 128 LoRA dropout 0.05 Policy learning rate 5\times 10^{-5} Value head learning rate 1\times 10^{-4} Optimizer AdamW Weight decay 0.03 Gradient norm clipping 1.0 Learning rate schedule Cosine Warm-up steps 10 Schedule decay factor 0.01 Rollout and Sampling Stage I rollout epochs 100 Stage II rollout epochs 100 Global batch size 320 Mini-batch size 8 Sampling temperature 0.6 Maximum action steps 200 AirSim ClockSpeed 10 PPO and Dynamic Failure Memory Discount factor \gamma 0.995 GAE parameter \lambda 0.97 PPO clipping threshold \epsilon 0.2 Value loss coefficient c_{v} 0.1 KL coefficient \beta 0.03 Memory sampling ratio \eta 0.2 Maximum unsuccessful retries N_{\max} 2 Reward Configuration Progress reward 0.02 per meter, capped at 0.06 per step Distance increase penalty 0.02 per meter, capped at 0.06 in magnitude Successful landing reward 3.0 Collision penalty -2.0 Timeout penalty -1.0 Early stop penalty -0.8 Stuck penalty -1.2 Continuous away penalty -1.5 Invalid action penalty -0.5
+
+Training and Evaluation Parameters
+
+RefineFly uses the same optimizer, rollout, and reward configurations in both curriculum stages. Specifically, online post-training continues to optimize the existing adapter with its original LoRA configuration, while the scene distribution and frozen reference policy change between stages as described in the main text. Table 9 summarizes the training and evaluation parameters.
+
+The online rollout budget counts both fresh task executions and executions selected from dynamic failure memory. Across both stages, fresh task executions amount to approximately 25% of the training-set size. With memory-selected executions accounting for \eta=0.2 of all sampled episodes, the total is 0.25/(1-\eta)=31.25\% of the training-set size, reported as approximately 30%. This ratio measures task executions relative to the number of training tasks, including repeated executions.
+
+The main comparison reports RefineFly performance over three evaluation seeds, while ablations use a single evaluation seed. Specifically, the main results give the mean and standard deviation for seeds 1, 42, and 12345. The evaluated post-training configurations in the ablations and corresponding supplementary analyses use seed 1.
+
+Appendix B Dynamic Failure Memory Details
+
+This section describes the navigation feedback and observed outcomes associated with dynamic failure memory. Specifically, Section F defines the events, Section F reports their frequencies, and Section F analyzes the memory lifecycle and task-level changes in evaluation performance.
+
+Event Types
+
+Navigation events distinguish successful completion from different forms of unsuccessful execution and determine the associated reward feedback.
+
+Success.
+
+A success event occurs when the UAV is within 20 meters of the target object and either executes LAND or exhibits near-zero movement for 10 consecutive time steps.
+
+Collision.
+
+A collision event occurs when the simulator reports a physical collision or depth observations indicate that the UAV is too close to an obstacle.
+
+Stuck.
+
+A stuck event occurs when the UAV exhibits near-zero movement for 10 consecutive steps outside the target region.
+
+Continuous away.
+
+A continuous-away event occurs when the distance to the target object increases for 10 consecutive steps.
+
+Early stop.
+
+An early-stop event occurs when the policy issues LAND outside the target region.
+
+Timeout.
+
+A timeout event occurs when an episode reaches the 200-step horizon without success.
+
+Invalid actions receive a separate format-related penalty. Specifically, an output sequence that cannot be decoded into a valid UAV command produces a safe no-op and receives the penalty in Table 9 .
+
+Figure 4: Distribution of 1488 closed-loop navigation failure events recorded during RefineFly training. Collisions account for 1073 events, with 415 events across the other four failure types. Invalid action outputs are excluded.
+
+Failure Distribution
+
+The recorded failures span several navigation difficulties, with collisions accounting for the largest share. Specifically, Fig. 9 summarizes 1488 events from fresh and memory-selected task executions. Collisions account for 1073 events, or 72.1%, followed by continuous-away and timeout events with 183 and 138 cases, or 12.3% and 9.3%. Early-stop and stuck events contribute 48 and 46 cases, together accounting for 6.3%. These events provide feedback on obstacle avoidance, directional progress, and task termination beyond the terminal success signal. To provide unresolved tasks from the start of post-training, we initialize the memory using failures collected with the initial policy and subsequently update its records using navigation outcomes.
+
+Table 7: Paired task-level outcomes for token-level PPO (ID 1) and PPO with dynamic failure memory (ID 2) on identical evaluation tasks. S and F denote success and failure. The F\rightarrow S rate is n_{F\rightarrow S}/(n_{F\rightarrow S}+n_{F\rightarrow F}) , and the S\rightarrow F rate is n_{S\rightarrow F}/(n_{S\rightarrow S}+n_{S\rightarrow F}) . The net change is \Delta\mathrm{SR}=100(n_{F\rightarrow S}-n_{S\rightarrow F})/N . All Splits pools the counts over N=3005 tasks and recomputes each rate using its corresponding denominator.
+
+Paired Outcome Transitions Outcome Changes Evaluation Split S\!\rightarrow\!S S\!\rightarrow\!F F\!\rightarrow\!S F\!\rightarrow\!F Net Successes F\rightarrow S Rate (%) S\rightarrow F Rate (%) \Delta SR (pp) Seen 493 190 304 431 +114 41.36 27.82 +8.04 Unseen Map 185 226 114 433 -112 20.84 54.99 -11.69 Unseen Object 268 87 108 166 +21 39.42 24.51 +3.34 All Splits 946 503 526 1,030 +23 33.80 34.71 +0.77
+
+Figure 5: Final states of 1488 failure-memory records over the recorded training interval. The 720 resolved records include successful executions from both memory selection and fresh sampling of active tasks. Another 724 records remain active, while 44 are dropped after two unsuccessful retries.
+
+Figure 6: Average return of token-level PPO and the sequence-level baseline over 100 training steps.
+
+Table 8: Full-split SR (%) for sequence-level and token-level PPO on the three TravelUAV evaluation splits. Token-level PPO corresponds to ID 1 in the main-paper component ablation. Bold indicates the higher result in each row.
+
+Evaluation Split Sequence-Level PPO Token-Level PPO Seen 41.96 48.17 Unseen Map 37.79 42.90 Unseen Object 48.81 56.44
+
+Observed Memory Outcomes
+
+Fig. 10 summarizes the final states of 1488 failure entries. The observed memory states summarize task outcomes from both sampling sources over the recorded interval. Specifically, Fig. 10 reports 720 resolved, 724 active, and 44 dropped records out of 1488. The resolved count includes active tasks completed successfully through fresh sampling as well as memory-selected executions. Active records remain eligible for further training, while dropped records have exhausted the retry limit. Together, these states characterize the memory lifecycle under the available interaction budget.
+
+Dynamic failure memory yields more favorable paired outcomes on Seen and Unseen Object, supporting the value of sustained training on unresolved tasks. Specifically, Table 10 compares the two policies on identical evaluation tasks. On Seen, 304 tasks change from failure under ID 1 to success under ID 2, while 190 change from success to failure, yielding 114 net successes and an 8.04-point SR increase. Similarly, Unseen Object has 108 failure-to-success transitions and 87 success-to-failure transitions, yielding 21 net successes and a 3.34-point SR increase. These gains are consistent with repeated current-policy interaction providing further learning opportunities under previously unsuccessful navigation conditions.
+
+The paired outcomes also reveal a trade-off in transfer to unseen maps under the empirical scene distribution. Specifically, Unseen Map has 114 failure-to-success transitions and 226 success-to-failure transitions, yielding 112 net lost successes and an 11.69-point SR decrease. Across all 3005 tasks, the net gain is 23 successes, or 0.77 percentage points. This pooled change weights splits by task count, whereas the main-paper ablation reports an unweighted mean across splits, which decreases by 0.10 points from ID 1 to ID 2. Together, these results indicate that sustained failure learning can improve some navigation outcomes while weakening transfer to new maps. Since memory sampling preserves the empirical scene allocation in this comparison, rare scenes retain a limited share of training opportunities, motivating reference constraints and the scene rebalancing evaluated in the main text.
+
+Figure 7: Qualitative navigation comparison under the same instruction and initial observation. The top and bottom rows show key observations from AerialVLA and RefineFly, respectively. Numbers indicate their order within each trajectory.
+
+Appendix C Comparison of Token-Level and Sequence-Level PPO
+
+This section provides empirical support for token-level PPO as the optimization backbone of RefineFly. Specifically, the sequence-level alternative computes one importance ratio from the joint likelihood of the complete action-token sequence. Fig. 11 compares training returns, while Table 11 reports Full-split success rate (SR) for both alternatives. Token-level PPO corresponds to ID 1 in the main-paper component ablation.
+
+Token-level PPO achieves higher training returns than the sequence-level alternative in the recorded run. As shown in Fig. 11 , its average return rises rapidly during the first 15 training steps and subsequently remains mostly between 2.0 and 3.0, with a peak near 3.5. In comparison, the sequence-level return mostly stays below 1.0 without comparable growth, and the gap persists through the later training steps.
+
+The higher training returns are accompanied by better navigation performance across all three evaluation splits. Specifically, token-level PPO exceeds the sequence-level alternative by 5.11 to 7.63 percentage points in SR (Table 11 ). Relative to AerialVLA in Table 4 , sequence-level PPO reduces mean SR by 4.53 points, while token-level PPO increases it by 1.79 points. These results support the token-level backbone for the subsequent study of failure memory and scene sampling.
+
+The different treatment of action-token probability ratios offers a possible explanation for the observed performance gap. Specifically, each action contains three control tokens and an optional LAND token. Sequence-level PPO couples these probabilities into a joint importance ratio, allowing a change at one position to activate clipping of the shared surrogate objective. In comparison, token-level PPO applies clipping separately at each valid position while sharing the action-level advantage across positions. This formulation reduces coupling in the clipping decisions and may retain learning signals at positions whose individual ratios remain within the clipping range.
+
+Appendix D Qualitative Analysis
+
+This section illustrates differences in closed-loop navigation between AerialVLA and RefineFly under the same instruction and initial observation. Specifically, Fig. 12 presents nine key observations from each trajectory. Both policies initially traverse similar city blocks, while their behavior diverges later in the route.
+
+As shown in Fig. 12 , AerialVLA initially follows a similar route and subsequently moves away from the target area. In comparison, RefineFly proceeds toward the street marked by the crosswalk and intersecting shadow. The target becomes clearly visible in the eighth observation, after which RefineFly continues its descent and reaches the target location in the final observation. This example illustrates improved target approach and task completion following post-training, consistent with the aggregate navigation gains reported in the main text.
+
+Appendix
+
+This supplementary material details the scene distribution, training configuration, dynamic failure memory, and additional analyses of RefineFly. Section E specifies the data and optimization settings. Section F describes navigation events, memory outcomes, and paired task-level performance changes. Section G compares token-level and sequence-level PPO, while Section H presents a representative navigation case.
+
+Appendix E Detailed Experimental Settings
+
+This section reports the training-set composition and optimization configuration used for RefineFly.
+
+Dataset
+
+Benchmarks for Aerial Agents.
+
+Existing benchmarks for aerial agents and UAV-VLN cover complementary levels of perception, reasoning, and control. AerialVLN ( Liu et al., 2023 ) and AVDN ( Fan et al., 2023 ) established outdoor instruction-following and dialog-conditioned navigation, while UAV-ON ( Xiao et al., 2025 ) extended evaluation to open-world object-goal search. More recent benchmarks emphasize either data scale or high-level cognition, with OpenFly ( Gao et al., 2026 ) providing diverse trajectories based on predefined flight-action primitives, SpatialSky-Bench ( Zhang et al., 2025b ) assessing aerial spatial intelligence, and UAVBench ( Ferrag et al., 2025 ) evaluating mission-level reasoning.
+
+Our study requires closed-loop interaction with executable flight actions and explicit navigation feedback. Accordingly, we adopt TravelUAV ( Wang et al., 2025 ) , which provides target-oriented navigation with continuous trajectories and evaluation splits covering seen scenes, unseen maps, and unseen objects. Moreover, TravelUAV provides the training and evaluation setting for AerialVLA ( Xu et al., 2026 ) , whose end-to-end VLA policy maps onboard observations and linguistic prompts to continuous 3-DoF controls and an intrinsic landing decision. This alignment supports evaluating online post-training in the environment and action space used by the behavior-cloned initialization.
+
+Training-Set Distribution.
+
+The TravelUAV training set exhibits a pronounced imbalance across its 19 scenes. Specifically, Fig. 8 reports 7922 training samples, of which 7611 belong to 11 common scenes and account for 96.07% of the total. The remaining 311 samples span 8 rare scenes and account for only 3.93%. Furthermore, the largest scene contains 1545 samples, while the rare-scene counts range from 17 to 59. We define the rare-scene set as
+
+\mathcal{R}=\{c\in\mathcal{C}\mid N_{c}<100\}, (10)
+
+where N_{c} denotes the number of training samples associated with scene c .
+
+Figure 8: Training sample counts across the 19 TravelUAV scenes used by the UAV-Need-Help task.
+
+Two-Stage Scene Sampling.
+
+The two-stage curriculum changes the overall scene allocation while retaining failure-memory sampling within each stage. Specifically, Stage I follows the empirical scene distribution shown in Fig. 8 , while Stage II assigns an equal quota of 100 selections to each scene. Within these scene allocations, a fraction \eta of rollouts is assigned to unresolved tasks in dynamic failure memory, and the remainder uses fresh task sampling. For fresh sampling, tasks are selected without replacement while unused tasks remain available, followed by sampling with replacement when needed to fill the allocation. Consequently, a complete Stage II quota cycle contains 1900 selections, including 800 from rare scenes. The rare-scene share thus increases from 3.93% under the empirical distribution to 42.11%, providing more opportunities for both fresh interaction and continued learning from failures in these scenes.
+
+Table 9: Training and evaluation parameters for RefineFly.
+
+Parameter Value Model and Optimization LoRA rank r 64 LoRA scaling \alpha 128 LoRA dropout 0.05 Policy learning rate 5\times 10^{-5} Value head learning rate 1\times 10^{-4} Optimizer AdamW Weight decay 0.03 Gradient norm clipping 1.0 Learning rate schedule Cosine Warm-up steps 10 Schedule decay factor 0.01 Rollout and Sampling Stage I rollout epochs 100 Stage II rollout epochs 100 Global batch size 320 Mini-batch size 8 Sampling temperature 0.6 Maximum action steps 200 AirSim ClockSpeed 10 PPO and Dynamic Failure Memory Discount factor \gamma 0.995 GAE parameter \lambda 0.97 PPO clipping threshold \epsilon 0.2 Value loss coefficient c_{v} 0.1 KL coefficient \beta 0.03 Memory sampling ratio \eta 0.2 Maximum unsuccessful retries N_{\max} 2 Reward Configuration Progress reward 0.02 per meter, capped at 0.06 per step Distance increase penalty 0.02 per meter, capped at 0.06 in magnitude Successful landing reward 3.0 Collision penalty -2.0 Timeout penalty -1.0 Early stop penalty -0.8 Stuck penalty -1.2 Continuous away penalty -1.5 Invalid action penalty -0.5
+
+Training and Evaluation Parameters
+
+RefineFly uses the same optimizer, rollout, and reward configurations in both curriculum stages. Specifically, online post-training continues to optimize the existing adapter with its original LoRA configuration, while the scene distribution and frozen reference policy change between stages as described in the main text. Table 9 summarizes the training and evaluation parameters.
+
+The online rollout budget counts both fresh task executions and executions selected from dynamic failure memory. Across both stages, fresh task executions amount to approximately 25% of the training-set size. With memory-selected executions accounting for \eta=0.2 of all sampled episodes, the total is 0.25/(1-\eta)=31.25\% of the training-set size, reported as approximately 30%. This ratio measures task executions relative to the number of training tasks, including repeated executions.
+
+The main comparison reports RefineFly performance over three evaluation seeds, while ablations use a single evaluation seed. Specifically, the main results give the mean and standard deviation for seeds 1, 42, and 12345. The evaluated post-training configurations in the ablations and corresponding supplementary analyses use seed 1.
+
+Appendix F Dynamic Failure Memory Details
+
+This section describes the navigation feedback and observed outcomes associated with dynamic failure memory. Specifically, Section F defines the events, Section F reports their frequencies, and Section F analyzes the memory lifecycle and task-level changes in evaluation performance.
+
+Event Types
+
+Navigation events distinguish successful completion from different forms of unsuccessful execution and determine the associated reward feedback.
+
+Success.
+
+A success event occurs when the UAV is within 20 meters of the target object and either executes LAND or exhibits near-zero movement for 10 consecutive time steps.
+
+Collision.
+
+A collision event occurs when the simulator reports a physical collision or depth observations indicate that the UAV is too close to an obstacle.
+
+Stuck.
+
+A stuck event occurs when the UAV exhibits near-zero movement for 10 consecutive steps outside the target region.
+
+Continuous away.
+
+A continuous-away event occurs when the distance to the target object increases for 10 consecutive steps.
+
+Early stop.
+
+An early-stop event occurs when the policy issues LAND outside the target region.
+
+Timeout.
+
+A timeout event occurs when an episode reaches the 200-step horizon without success.
+
+Invalid actions receive a separate format-related penalty. Specifically, an output sequence that cannot be decoded into a valid UAV command produces a safe no-op and receives the penalty in Table 9 .
+
+Figure 9: Distribution of 1488 closed-loop navigation failure events recorded during RefineFly training. Collisions account for 1073 events, with 415 events across the other four failure types. Invalid action outputs are excluded.
+
+Failure Distribution
+
+The recorded failures span several navigation difficulties, with collisions accounting for the largest share. Specifically, Fig. 9 summarizes 1488 events from fresh and memory-selected task executions. Collisions account for 1073 events, or 72.1%, followed by continuous-away and timeout events with 183 and 138 cases, or 12.3% and 9.3%. Early-stop and stuck events contribute 48 and 46 cases, together accounting for 6.3%. These events provide feedback on obstacle avoidance, directional progress, and task termination beyond the terminal success signal. To provide unresolved tasks from the start of post-training, we initialize the memory using failures collected with the initial policy and subsequently update its records using navigation outcomes.
+
+Table 10: Paired task-level outcomes for token-level PPO (ID 1) and PPO with dynamic failure memory (ID 2) on identical evaluation tasks. S and F denote success and failure. The F\rightarrow S rate is n_{F\rightarrow S}/(n_{F\rightarrow S}+n_{F\rightarrow F}) , and the S\rightarrow F rate is n_{S\rightarrow F}/(n_{S\rightarrow S}+n_{S\rightarrow F}) . The net change is \Delta\mathrm{SR}=100(n_{F\rightarrow S}-n_{S\rightarrow F})/N . All Splits pools the counts over N=3005 tasks and recomputes each rate using its corresponding denominator.
+
+Paired Outcome Transitions Outcome Changes Evaluation Split S\!\rightarrow\!S S\!\rightarrow\!F F\!\rightarrow\!S F\!\rightarrow\!F Net Successes F\rightarrow S Rate (%) S\rightarrow F Rate (%) \Delta SR (pp) Seen 493 190 304 431 +114 41.36 27.82 +8.04 Unseen Map 185 226 114 433 -112 20.84 54.99 -11.69 Unseen Object 268 87 108 166 +21 39.42 24.51 +3.34 All Splits 946 503 526 1,030 +23 33.80 34.71 +0.77
+
+Figure 10: Final states of 1488 failure-memory records over the recorded training interval. The 720 resolved records include successful executions from both memory selection and fresh sampling of active tasks. Another 724 records remain active, while 44 are dropped after two unsuccessful retries.
+
+Figure 11: Average return of token-level PPO and the sequence-level baseline over 100 training steps.
+
+Table 11: Full-split SR (%) for sequence-level and token-level PPO on the three TravelUAV evaluation splits. Token-level PPO corresponds to ID 1 in the main-paper component ablation. Bold indicates the higher result in each row.
+
+Evaluation Split Sequence-Level PPO Token-Level PPO Seen 41.96 48.17 Unseen Map 37.79 42.90 Unseen Object 48.81 56.44
+
+Observed Memory Outcomes
+
+Fig. 10 summarizes the final states of 1488 failure entries. The observed memory states summarize task outcomes from both sampling sources over the recorded interval. Specifically, Fig. 10 reports 720 resolved, 724 active, and 44 dropped records out of 1488. The resolved count includes active tasks completed successfully through fresh sampling as well as memory-selected executions. Active records remain eligible for further training, while dropped records have exhausted the retry limit. Together, these states characterize the memory lifecycle under the available interaction budget.
+
+Dynamic failure memory yields more favorable paired outcomes on Seen and Unseen Object, supporting the value of sustained training on unresolved tasks. Specifically, Table 10 compares the two policies on identical evaluation tasks. On Seen, 304 tasks change from failure under ID 1 to success under ID 2, while 190 change from success to failure, yielding 114 net successes and an 8.04-point SR increase. Similarly, Unseen Object has 108 failure-to-success transitions and 87 success-to-failure transitions, yielding 21 net successes and a 3.34-point SR increase. These gains are consistent with repeated current-policy interaction providing further learning opportunities under previously unsuccessful navigation conditions.
+
+The paired outcomes also reveal a trade-off in transfer to unseen maps under the empirical scene distribution. Specifically, Unseen Map has 114 failure-to-success transitions and 226 success-to-failure transitions, yielding 112 net lost successes and an 11.69-point SR decrease. Across all 3005 tasks, the net gain is 23 successes, or 0.77 percentage points. This pooled change weights splits by task count, whereas the main-paper ablation reports an unweighted mean across splits, which decreases by 0.10 points from ID 1 to ID 2. Together, these results indicate that sustained failure learning can improve some navigation outcomes while weakening transfer to new maps. Since memory sampling preserves the empirical scene allocation in this comparison, rare scenes retain a limited share of training opportunities, motivating reference constraints and the scene rebalancing evaluated in the main text.
+
+Figure 12: Qualitative navigation comparison under the same instruction and initial observation. The top and bottom rows show key observations from AerialVLA and RefineFly, respectively. Numbers indicate their order within each trajectory.
+
+Appendix G Comparison of Token-Level and Sequence-Level PPO
+
+This section provides empirical support for token-level PPO as the optimization backbone of RefineFly. Specifically, the sequence-level alternative computes one importance ratio from the joint likelihood of the complete action-token sequence. Fig. 11 compares training returns, while Table 11 reports Full-split success rate (SR) for both alternatives. Token-level PPO corresponds to ID 1 in the main-paper component ablation.
+
+Token-level PPO achieves higher training returns than the sequence-level alternative in the recorded run. As shown in Fig. 11 , its average return rises rapidly during the first 15 training steps and subsequently remains mostly between 2.0 and 3.0, with a peak near 3.5. In comparison, the sequence-level return mostly stays below 1.0 without comparable growth, and the gap persists through the later training steps.
+
+The higher training returns are accompanied by better navigation performance across all three evaluation splits. Specifically, token-level PPO exceeds the sequence-level alternative by 5.11 to 7.63 percentage points in SR (Table 11 ). Relative to AerialVLA in Table 4 , sequence-level PPO reduces mean SR by 4.53 points, while token-level PPO increases it by 1.79 points. These results support the token-level backbone for the subsequent study of failure memory and scene sampling.
+
+The different treatment of action-token probability ratios offers a possible explanation for the observed performance gap. Specifically, each action contains three control tokens and an optional LAND token. Sequence-level PPO couples these probabilities into a joint importance ratio, allowing a change at one position to activate clipping of the shared surrogate objective. In comparison, token-level PPO applies clipping separately at each valid position while sharing the action-level advantage across positions. This formulation reduces coupling in the clipping decisions and may retain learning signals at positions whose individual ratios remain within the clipping range.
+
+Appendix H Qualitative Analysis
+
+This section illustrates differences in closed-loop navigation between AerialVLA and RefineFly under the same instruction and initial observation. Specifically, Fig. 12 presents nine key observations from each trajectory. Both policies initially traverse similar city blocks, while their behavior diverges later in the route.
+
+As shown in Fig. 12 , AerialVLA initially follows a similar route and subsequently moves away from the target area. In comparison, RefineFly proceeds toward the street marked by the crosswalk and intersecting shadow. The target becomes clearly visible in the eighth observation, after which RefineFly continues its descent and reaches the target location in the final observation. This example illustrates improved target approach and task completion following post-training, consistent with the aggregate navigation gains reported in the main text.

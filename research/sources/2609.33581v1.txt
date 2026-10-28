@@ -1,0 +1,494 @@
+ForeFly: A Dual-Horizon World Action Model for Aerial Vision-Language Navigation
+
+Aerial Vision-Language Navigation (AVLN) requires UAVs to maintain reliable instruction following over long trajectories in complex 3D environments.
+However, existing AVLN approaches are predominantly reactive or limited to single-horizon prediction, overlooking complementary future cues across different temporal horizons.
+To address this limitation, we propose ForeFly, a dual-horizon latent world action model that predicts both a proximal future for local continuity and an adaptive route-critical future for long-range guidance.
+Horizon-specific foresight queries are primed with recent and route-critical visual memories, providing history-aware context for future prediction.
+To exploit their distinct roles in action generation, we introduce Foresight-Guided Action Refinement (FGAR), which asymmetrically exploits proximal foresight for local action enhancement and route-critical foresight for feature-wise correction and route-level guidance.
+Experiments on the TravelUAV and UAV-ON benchmarks show that ForeFly consistently outperforms strong baselines across seen and unseen settings, validating the effectiveness of dual-horizon foresight and FGAR learning.
+The code is available at: https://github.com/kunhuiW/ForeFly
+
+
+
+1 Introduction
+
+Aerial Vision-Language Navigation (AVLN) aims to enable unmanned aerial vehicles (UAVs) to understand natural-language instructions and autonomously navigate in complex, open-world three-dimensional environments Liu et al. (2023) ; Fan et al. (2022) .
+Compared with conventional embodied navigation on the ground Anderson et al. (2017) ; Ku et al. (2020) ; Krantz et al. (2020) ; Qi et al. (2020) ; Blukis et al. (2018) , AVLN poses challenges due to the large-scale search space, continuous 3D motion, drastic viewpoint changes, and weak geometric constraints in aerial scenes Chen et al. (2019) ; Gao et al. (2026) ; Lin et al. (2025) ; Dai et al. (2026) .
+Moreover, language instructions in aerial navigation involve distant landmarks, route-level spatial relations, and long-horizon events, requiring the agent to maintain coherent visual-language understanding over extended trajectories Liu et al. (2023) ; Sun et al. (2026b) ; Lee et al. (2024) ; Gu et al. (2026) .
+These characteristics make AVLN a challenging yet important task for building robust autonomous aerial agents.
+
+Recent advances in vision-language navigation Gao et al. (2026) ; Zheng et al. (2026b) ; Lin et al. (2025) ; Jiang et al. (2026) have explored end-to-end frameworks to align visual observations with language instructions and translate multimodal understanding into navigation actions.
+Existing methods typically encode the current view, instruction context, and trajectory history to predict the next waypoint or control command, enabling UAVs to follow complex routes in outdoor environments.
+Despite their progress, most of these methods predominantly operate within a reactive paradigm (Figure 1 (a)), where actions are inferred mainly from already observed visual-language evidence.
+As a result, they lack an explicit mechanism to anticipate future visual states and navigation-critical events before they become immediately observable.
+
+The absence of anticipatory modeling is particularly problematic in aerial navigation.
+Under continuous 3D motion and rapidly changing viewpoints, local decision errors tend to propagate into substantial trajectory deviations Lin et al. (2025) ; Wang et al. (2025) .
+Missing a turning point or failing to identify a landmark transition can cause the agent to drift away from the instruction-relevant route, making subsequent recovery increasingly difficult.
+Therefore, effective AVLN agents should go beyond reactive action prediction and reason about instruction-relevant future states.
+
+Figure 1: (a) Reactive policies predict actions without future modeling.
+(b) Single-horizon methods predict a single future latent, overlooking complementary navigation roles for local continuity and route-level anticipation.
+(c) ForeFly jointly predicts proximal and route-critical futures, while FGAR integrates them for locally smooth and strategically consistent navigation.
+
+A natural way to introduce such foresight is to predict future observations.
+However, directly forecasting future images in the pixel space is computationally demanding and will force the model to reconstruct visual details that are irrelevant to navigation, such as textures, illumination, or background appearance Chen et al. (2025) ; Emami et al. (2025) ; Zhao et al. (2026) .
+Meanwhile, existing single-horizon prediction typically focuses on the immediate future, capturing short-term visual continuity but overlooking complementary cues at different temporal horizons that are critical for long-horizon aerial decision-making, such as upcoming turns, landmark transitions, and target-approaching regions Jia et al. (2026) ; Zhang et al. (2026e) ; Zheng et al. (2026a) .
+Motivated by this observation, we model navigation-relevant futures at two complementary temporal horizons, predicting both proximal and route-critical future states in a compact latent space instead of reconstructing them in the pixel space.
+Specifically, proximal futures capture local motion continuity under continuous 3D motion and drastic viewpoint changes, while route-critical futures anticipate sparse navigation events to support long-range guidance over large-scale, weakly constrained aerial environments.
+
+To this end, we propose ForeFly (Figure 1 (c)), a retrospective dual-horizon world action model for AVLN. ForeFly first grounds horizon-specific foresight in recent and route-critical visual memories,
+then predicts complementary proximal and adaptive route-critical future latents to capture short-term motion continuity and long-range route anticipation,
+finally refines waypoint generation through Foresight-Guided Action Refinement (FGAR), which assigns asymmetric decision roles to dual-horizon foresight, leveraging proximal foresight for local action enhancement and route-critical foresight for strategic route-level correction. Our contributions are threefold:
+
+We reformulate AVLN from reactive action prediction into dual-horizon foresight that jointly models complementary proximal and route-critical latent futures, supporting both local motion continuity and long-range route guidance.
+
+We instantiate dual-horizon foresight with horizon-specific foresight query priming and an asymmetric Foresight-Guided Action Refinement (FGAR) module, which leverages complementary historical cues and translate proximal and route-critical foresight into local action enhancement and route-level correction, respectively.
+
+Experiments on TravelUAV and UAV-ON show consistent gains over strong baselines, particularly on long-range and unseen trajectories, while ablations validate the effectiveness and complementarity of dual-horizon foresight.
+
+2 Related Work
+
+Aerial Vision-Language Navigation. Vision-Language Navigation (VLN) was initially studied in ground-based environments,
+where embodied agents follow natural-language instructions through indoor or street-level scenes Anderson et al. (2017) ; Ku et al. (2020) ; An et al. (2025) ; Zhu et al. (2020) ; Wang et al. (2021) .
+Compared to ground-based VLN, AVLN presents unique challenges,
+including a continuous 3D motion space, drastic viewpoint transitions, and heavy reliance on long-range landmark dependencies Xu et al. (2026a) ; Chen et al. (2026) .
+To address these challenges, early AVLN methods improve visual-language grounding through auxiliary objectives, such as spatial-relation matching and contrastive learning Su et al. (2025) ; Chu et al. (2024) .
+More recent approaches increasingly adopt Multimodal Large Language Models (MLLMs) for navigation reasoning.
+For example, TravelUAV Wang et al. (2025) and FlightVLA Zheng et al. (2026b) employ hierarchical architectures that combine high-level language planning with low-level action refinement.
+Other methods incorporate depth or implicit 3D cues to strengthen spatial reasoning Sun et al. (2026b) ; Zhu et al. (2026) ; Jiang et al. (2026) ; Sun et al. (2026a) ; Liu et al. (2026a) , while several studies exploit historical spatial-semantic evidence to improve temporal consistency over long trajectories Kim et al. (2025) ; Lou et al. (2026) ; Qi et al. (2026) ; Ding et al. (2026) .
+Despite this progress, most existing AVLN methods remain predominantly reactive, predicting immediate actions from current and historical observations without explicitly modeling future world states. Consequently, they lack an explicit mechanism to anticipate navigation-critical events and use such foresight for proactive decision-making.
+
+World Action Model for VLN. World models have recently emerged as a promising paradigm for VLN, learning environment dynamics from past observations and actions to predict future states for navigation Zhang et al. (2026e) ; Koh et al. (2021) ; Bar et al. (2025) ; Yao et al. (2025) .
+Building on this idea, World Action Models (WAMs) unify future-state modeling and action generation within a single framework, and have recently been extended to VLN Ye et al. (2026) ; Cen et al. (2025) ; Xu et al. (2026b) .
+Some approaches jointly optimize future-state prediction and action generation, explicitly coupling navigation decisions with their anticipated perceptual consequences Yang et al. (2026) ; Zhang et al. (2026c) .
+Others employ video diffusion models to generate instruction-conditioned future observations and transfer their spatiotemporal priors to action or trajectory prediction Liu et al. (2026b) ; Xu et al. (2025) .
+Recent methods further incorporate action-aware reinforcement learning to align navigation policies with long-term rollout outcomes Zhang et al. (2026d) ; Zhao et al. (2026) .
+Despite this progress, existing methods largely emphasize short-horizon or single-step prediction, with limited mechanisms for anticipating sparse but navigation-critical future events.
+As a result, they may fail to foresee upcoming turns, landmark transitions, or other route-level cues, limiting proactive decision-making over long trajectories.
+
+3 Method
+
+3.1 Problem Formulation
+
+We formalize aerial vision-language navigation as a language-guided sequential decision-making problem, where a UAV navigates in a continuous 3D environment according to a natural-language instruction.
+Given a language instruction \mathcal{I} , the UAV maintains a trajectory history \mathcal{P}_{\leq t}=\{{p}_{1},{p}_{2},\ldots,{p}_{t}\} and
+a sequence of historical observations \mathcal{O}_{\leq t}=\{o_{1},o_{2},\ldots,o_{t}\} .
+At each time step t , given the navigation context \mathcal{C}_{t}=(\mathcal{I},\mathcal{P}_{\leq t},\mathcal{O}_{\leq t}) , the proposed world action model predicts dual-horizon future representations and conditions the next waypoint action on this foresight:
+
+p_{\theta}\left(Z^{p}_{t+1},Z^{c}_{t+\kappa_{t}},a_{t}\mid C_{t}\right)=p_{\theta}^{W}\left(Z^{p}_{t+1},Z^{c}_{t+\kappa_{t}}\mid C_{t}\right)p_{\theta}^{A}\left(a_{t}\mid C_{t},Z^{p}_{t+1},Z^{c}_{t+\kappa_{t}}\right), (1)
+
+where \mathbf{Z}_{t+1}^{p}\in\mathbb{R}^{N_{p}\times d} denotes the proximal future latent
+and \mathbf{Z}_{t+\kappa_{t}}^{c}\in\mathbb{R}^{N_{c}\times d} denotes the route-critical future latent.
+Here, \kappa_{t} is not a fixed constant, but an adaptive temporal offset determined by
+the route-critical target construction described in Sec. A.1 .
+The waypoint action is represented in the current UAV coordinate frame as:
+
+\mathbf{a}_{t}=(\mathbf{d}_{t},\Delta\rho_{t})=(\Delta x_{t},\Delta y_{t},\Delta z_{t},\Delta\rho_{t})\in\mathbb{R}^{4}. (2)
+
+where \mathbf{d}_{t}=(\Delta x_{t},\Delta y_{t},\Delta z_{t}) denotes the normalized relative waypoint direction in 3D space with \|\mathbf{d}_{t}\|_{2}=1 , and \Delta\rho_{t}\geq 0 denotes the movement magnitude.
+
+Figure 2: Overview of ForeFly. ForeFly primes dual-horizon foresight with complementary historical memories, predicts proximal and route-critical future latents, Foresight-Guided Action Refinement (FGAR) asymmetrically uses proximal foresight for local enhancement and route-critical foresight for feature-wise correction and route-level guidance.
+
+3.2 Overview
+
+As illustrated in Fig. 2 , ForeFly explicitly introduces
+future-world reasoning into aerial vision-language navigation instead of
+directly mapping the current multimodal context to an immediate waypoint.
+Given the instruction \mathcal{I} , trajectory history \mathcal{P}{\leq t} , and observation history \mathcal{O}{\leq t} , ForeFly leverages historical context to construct future-oriented representations and conditions waypoint prediction on the resulting dual-horizon foresight.
+
+Specifically, ForeFly first employs Dual-Memory Foresight Query Priming to construct recent and route-critical visual memories, providing complementary historical cues for history-aware foresight queries.
+Given the primed queries, Dual-Horizon Future Latent Prediction jointly infers a proximal future latent and an adaptive route-critical future latent under the multimodal context.
+Finally, Foresight-Guided Action Refinement assigns distinct roles to the dual-horizon foresight, using proximal prediction for local action enhancement and route-critical prediction for route-level correction.
+
+3.3 Dual-Memory Foresight Query Priming
+
+Learnable foresight queries lack explicit route-dependent historical grounding. We therefore introduce Dual-Memory Foresight Query Priming , which conditions horizon-specific foresight queries on complementary recent and route-critical visual memories before future latent prediction.
+
+Recent visual memory. At time step t , each historical observation o_{i} , i\leq t , is encoded as \mathbf{x}_{i}=\psi(o_{i}) ,
+where \psi(\cdot) denotes the visual encoding and projection pipeline, yielding visual embeddings \mathbf{x}_{i} .
+The recent visual memory \mathcal{M}_{t}^{p} retains features from the latest R observations, preserving short-term appearance and motion continuity around
+the current state.
+
+Route-critical visual memory. While recent observations characterize local visual evolution, long-horizon
+foresight benefits from sparse trajectory states associated with meaningful
+route transitions.
+In particular, turning events often coincide with key
+navigation decision points and capture structural changes in the route Han et al. (2025) ; Baghaei et al. (2025) .
+Let \mathbf{p}_{i}\in\mathbb{R}^{3} denote the UAV position at time step i .
+We define the normalized flight direction and the turning angle between
+consecutive directions as:
+
+\mathbf{v}_{i}=\frac{\mathbf{p}_{i}-\mathbf{p}_{i-1}}{\|\mathbf{p}_{i}-\mathbf{p}_{i-1}\|_{2}}\in\mathbb{S}^{2},\qquad\alpha_{i}=\cos^{-1}\!\left(\mathbf{v}_{i}^{\top}\mathbf{v}_{i+1}\right). (3)
+
+Frames satisfying \alpha_{i}\geq\tau_{p} are selected as turning anchors,
+where \tau_{p} is the turning-angle threshold.
+
+Turning events alone can be overly sparse along extended straight segments.
+We therefore introduce distance-based coverage anchors at approximately every \tau_{g} meters of accumulated travel.
+For two adjacent event anchors u and v , let s(u,j)=\sum_{k=u+1}^{j}\|\mathbf{p}_{k}-\mathbf{p}_{k-1}\|_{2} denote the traveled distance from u to j .
+The m -th coverage anchor is selected as:
+
+j_{m}^{\star}=\arg\min_{j:u<j<v}\left|s(u,j)-m\tau_{g}\right|,\ \qquad 0<m\tau_{g}<s(u,v). (4)
+
+The route-critical memory \mathcal{M}_{t}^{c} consists of visual features from the initial frame, detected turning events, and distance-based coverage anchors. This event-aware construction emphasizes route transitions while maintaining historical coverage over event-sparse trajectory segments.
+
+Horizon-specific foresight query priming. To exploit the complementary historical cues encoded in the two memories,
+we introduce learnable proximal and route-critical foresight queries, \mathcal{Q}^{p}\in\mathbb{R}^{N_{p}\times d} and \mathcal{Q}^{c}\in\mathbb{R}^{N_{c}\times d} , for different prediction horizons.
+The proximal and route-critical queries attend to their corresponding
+historical memories, \mathcal{M}_{t}^{p} and \mathcal{M}_{t}^{c} ,
+yielding the history-aware queries \widetilde{\mathcal{Q}}_{t}^{p} and \widetilde{\mathcal{Q}}_{t}^{c} , respectively.
+The resulting history-aware queries capture recent visual continuity and route-level historical cues, respectively, and are used for dual-horizon future latent prediction.
+
+3.4 Dual-Horizon Future Latent Prediction
+
+Given the primed foresight queries, we perform dual-horizon future prediction
+and action reasoning within a unified multimodal decoding process.
+At time step t , the instruction \mathcal{I} , trajectory history \mathcal{P}_{\leq t} , and current observation o_{t} are encoded as \bm{\ell} , \mathbf{e}_{\leq t}^{\mathrm{traj}} , and \mathbf{x}_{t} , respectively.
+The MLLM jointly processes these features with the primed proximal and
+route-critical queries \widetilde{\mathcal{Q}}_{t}^{p} and \widetilde{\mathcal{Q}}_{t}^{c} , together with the learnable action queries \mathcal{Q}^{a} .
+Here, the primed foresight queries inject complementary historical cues from
+the recent and route-critical memories, while the trajectory encoding provides
+explicit spatial context.
+Together, these inputs form a unified multimodal context for decoding
+proximal foresight, route-critical foresight, and action representations:
+
+\left(\mathbf{H}_{t+1}^{p},\mathbf{H}_{t+\kappa_{t}}^{c},\mathbf{H}_{t}^{a}\right)=f_{\theta}\left(\bm{\ell},\mathbf{e}_{\leq t}^{\mathrm{traj}},\mathbf{x}_{t}\,;\,\widetilde{\mathcal{Q}}_{t}^{p},\widetilde{\mathcal{Q}}_{t}^{c},\mathcal{Q}^{a}\right), (5)
+
+where \mathbf{H}_{t+1}^{p} , \mathbf{H}_{t+\kappa_{t}}^{c} , and \mathbf{H}_{t}^{a} denote the decoded representations for proximal future modeling, route-critical future modeling, and waypoint prediction, respectively.
+
+During this decoding process, we avoid reconstructing future RGB observations
+and instead supervise the decoded foresight representations in a compact visual
+embedding space. Specifically, a shared projection head g(\cdot) maps the
+proximal and route-critical representations to \hat{\mathbf{Z}}_{t+1}^{p}=g(\mathbf{H}_{t+1}^{p}) and \hat{\mathbf{Z}}_{t+\kappa_{t}}^{c}=g(\mathbf{H}_{t+\kappa_{t}}^{c}) ,
+respectively. These auxiliary predictions are supervised by the visual
+representations of the corresponding future observations, encouraging the
+decoded foresight representations to capture navigation-relevant semantic
+layout, scene transitions, and spatial structure without modeling unnecessary
+pixel-level details. Sharing the projection head encourages the two branches
+to produce future representations in a consistent latent space, while their
+distinct foresight queries preserve horizon-specific temporal information.
+
+The action-query representation \mathbf{H}_{t}^{a} summarizes
+action-oriented evidence from the current multimodal context. However, using
+it directly for waypoint regression may still produce a predominantly
+reactive policy.
+We therefore introduce a Foresight-Guided Action Refinement (FGAR) module that explicitly refines the action representation using the proximal and route-critical foresight representations, providing complementary local and route-level guidance: \hat{\mathbf{a}}_{t}=\Phi_{\mathrm{FGAR}}\left(\mathbf{H}_{t}^{a},\hat{\mathbf{Z}}_{t+1}^{p},\hat{\mathbf{Z}}_{t+\kappa_{t}}^{c}\right) ,
+where \Phi_{\mathrm{FGAR}}(\cdot) denotes the Foresight-Guided Action
+Refinement operation.
+
+Training Objective. To jointly align future-world imagination with waypoint prediction, we
+supervise both the dual-horizon latent predictions and the predicted action.
+The waypoint action is decomposed into a 3D direction \mathbf{d}_{t} and a movement magnitude \Delta\rho_{t} .
+The joint training objective is:
+
+\displaystyle\mathcal{L}_{W} \displaystyle=\mathbb{E}_{(\mathcal{C}_{t},\{o_{t+\delta_{h}}\}_{h\in\{p,c\}})\sim\mathcal{D}}\left[\sum_{h\in\{p,c\}}\frac{1}{N_{h}d}\left\|\hat{\mathbf{Z}}^{h}_{t+\delta_{h}}-\psi(o_{t+\delta_{h}})\right\|_{F}^{2}\right], (6) \displaystyle\mathcal{L}_{A} \displaystyle=\mathbb{E}_{(\mathcal{C}_{t},\mathbf{a}_{t})\sim\mathcal{D}}\left[1-\hat{\mathbf{d}}_{t}^{\top}\mathbf{d}_{t}+\left|{\Delta\hat{\rho}}_{t}-\Delta\rho_{t}\right|\right].
+
+where \{\hat{\mathbf{Z}}_{t+\delta_{h}}^{h}\}_{h\in\{p,c\}} denote the predicted dual-horizon future representations at horizon h\in\{p,c\} , with \delta_{p}=1 and \delta_{c}=\kappa_{t} denoting the proximal and
+route-critical prediction horizons, respectively.
+The overall training objective is given by \mathcal{L}=\mathcal{L}_{W}+\mathcal{L}_{A} .
+
+3.5 Foresight-Guided Action Refinement
+
+Within the unified multimodal decoding process, the action representation is jointly contextualized with the proximal and route-critical foresight representations.
+However, this generic contextualization does not explicitly distinguish their complementary roles in action generation.
+We therefore introduce a Foresight-Guided Action Refinement (FGAR) module
+that refines the action representation with dual-horizon
+foresight, using proximal prediction to strengthen local action evidence and
+route-critical prediction to further impose route-level guidance before
+waypoint decoding.
+
+Proximal future enhancement. The proximal future latent describes the immediate visual evolution from the
+current observation. We first use the action representation as the query and
+the predicted proximal latent as the key and value \mathbf{C}_{t}^{p}=\operatorname{Attn}_{p}(\mathbf{H}_{t}^{a},\hat{\mathbf{Z}}_{t+1}^{p}), where \mathbf{C}_{t}^{p} denotes the proximal-enhanced action representation.
+This interaction grounds the waypoint decision in anticipated short-term
+changes in viewpoint, local geometry, and scene layout.
+
+Asymmetric route-critical conditioning. A straightforward fusion of the proximal and route-critical future latents
+would treat the two horizons as equally relevant to action prediction.
+However, they play fundamentally different roles in aerial navigation.
+The proximal future describes locally executable scene evolution, whereas the
+route-critical future provides sparse but strategically important information
+about upcoming turns, landmark transitions, and route progress. We therefore
+adopt an asymmetric conditioning strategy: the proximal-enhanced action
+representation serves as the execution carrier, while the route-critical
+future acts as a high-level controller that selectively reshapes this local
+action evidence.
+
+Specifically, we first derive a route-conditioned correction context by
+allowing the proximal-enhanced action representation to attend to the
+route-critical future latent \mathbf{R}_{t}^{c}=\operatorname{Attn}_{c}(\mathbf{C}_{t}^{p},\hat{\mathbf{Z}}_{t+\kappa_{t}}^{c}). Rather than directly decoding \mathbf{R}_{t}^{c} into an action or replacing
+the locally grounded representation \mathbf{C}_{t}^{p} , we use it to generate
+a feature-wise transformation:
+
+\left[\bm{\gamma}_{t},\bm{\beta}_{t}\right]=\phi_{\mathrm{film}}\left(\mathbf{R}_{t}^{c}\right),\qquad\mathbf{T}_{t}^{p}=\left(1+\bm{\gamma}_{t}\right)\odot\mathbf{C}_{t}^{p}+\bm{\beta}_{t}. (7)
+
+Here, \mathbf{T}_{t}^{p} denotes the route-corrected proximal action
+representation. The scaling factor \bm{\gamma}_{t} controls which
+dimensions of the local action evidence should be amplified or suppressed,
+while \bm{\beta}_{t} introduces event-dependent feature shifts.
+Consequently, the route-critical future modifies the interpretation of the
+proximal future without discarding its locally executable geometric
+information.
+
+Since feature-wise modulation may overlook route-level cues,
+we introduce a parallel
+route-level guidance path. The original action representation directly queries the
+route-critical future latent:
+
+\mathbf{B}_{t}^{c}=\phi_{\mathrm{bias}}\left(\operatorname{Attn}_{b}\left(\operatorname{sg}\!\left(\mathbf{H}_{t}^{a}\right),\operatorname{sg}\!\left(\hat{\mathbf{Z}}_{t+\kappa_{t}}^{c}\right)\right)\right), (8)
+
+where \operatorname{sg}(\cdot) denotes the stop-gradient operation and \phi_{\mathrm{bias}}(\cdot) denotes the learnable projection. Unlike the modulation path, this branch produces an additive route-level decision \mathbf{B}_{t}^{c} . Detaching its inputs makes the branch a read-only consumer, preventing the additive path from becoming an optimization shortcut. Meanwhile, the main modulation path remains differentiable, allowing the route-critical representation to be jointly optimized for future prediction and downstream action utility.
+
+The final action integrates the original action evidence, route-corrected proximal features, and the detached route-level guidance residual:
+
+\hat{\mathbf{a}}_{t}=\phi_{\mathrm{act}}\left(\operatorname{LN}\left(\mathbf{H}_{t}^{a}+\mathbf{T}_{t}^{p}+\mathbf{B}_{t}^{c}\right)\right). (9)
+
+The original representation \mathbf{H}_{t}^{a} acts as a residual basis, \mathbf{T}_{t}^{p} preserves local executability while incorporating
+event-conditioned feature correction, and \mathbf{B}_{t}^{c} provides
+additive route-level guidance. The refined representation is then
+decoded into the waypoint action through the MLP projection \phi_{\mathrm{act}}(\cdot) .
+
+4 Experiment
+
+4.1 Experimental Setup
+
+Datasets. We conduct experiments on two widely used AVLN benchmarks, TravelUAV Wang et al. (2025) and UAV-ON Xiao et al. (2025) .
+TravelUAV contains 12,149 trajectories across 22 diverse scenarios, with target distances ranging from 50 m to 400 m.
+UAV-ON further provides 14 high-fidelity outdoor environments with diverse geographic structures, ranging from compact urban parks to expansive mountainous terrains.
+Together, these two benchmarks enable a comprehensive evaluation of navigation robustness and generalization across diverse aerial environments.
+
+Evaluation Metrics. Navigation performance is evaluated using four standard VLN metrics: Navigation Error (NE), Success Rate (SR), Oracle Success Rate (OSR), and Success weighted by Path Length (SPL). NE measures the final distance to the goal, SR reports the success rate of reaching the goal, and OSR checks whether the goal region is reached at any point along the trajectory. SPL additionally evaluates path efficiency by considering the ratio between the shortest and executed path lengths, providing a balanced assessment of navigation success and efficiency.
+
+Implementation Details. All experiments are conducted using PyTorch on four NVIDIA RTX 5090 GPUs. We adopt LLaMA 2-7B as the language backbone and EVA-ViT-G as the visual encoder. The numbers of proximal and route-critical foresight slots are both set to N_{p}=N_{c}=17 . The turning-angle threshold \tau_{p} and distance interval \tau_{g} are set to 20^{\circ} and 30 m, respectively. We fine-tune the model with LoRA using a learning rate of 5\times 10^{-5} .
+Training proceeds in two stages. In the first stage, we replace FGAR with a simple MLP head to stabilize future representation learning and waypoint prediction. In the second stage, FGAR is restored and all trainable components are jointly optimized, enabling future representations to effectively guide navigation decisions.
+
+4.2 Quantitative Results
+
+Table 1: Results on the TravelUAV Unseen dataset. NE is reported in meters (m), while SR, OSR, and SPL are reported as percentages (%). For task difficulty, Easy denotes trajectories shorter than 250 meters, whereas Hard denotes those longer than 250 meters.
+The best results are bold.
+
+Method Full Easy Hard NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow Random Action 225.64 0.06 0.06 0.06 164.66 0.19 0.19 0.19 280.58 0.00 0.00 0.00 Fixed Action 193.30 1.76 5.36 1.09 140.33 3.19 8.08 1.88 245.96 0.85 3.08 0.55 CMA Anderson et al. (2017) 147.27 4.98 12.41 4.74 102.54 8.03 17.52 7.52 191.30 2.76 7.53 2.71 TravelUAV Wang et al. (2025) 130.60 11.41 31.13 10.45 96.27 12.47 33.31 11.29 167.49 10.62 28.91 9.80 NavFoM Zhang et al. (2026b) 118.34 15.63 30.46 14.21 89.77 16.98 32.22 15.35 155.69 14.35 27.79 13.16 LongFly Jiang et al. (2025) 91.84 24.19 43.86 20.84 69.16 22.89 43.24 18.66 112.02 25.36 44.41 22.76 SpatialFly Jiang et al. (2026) 87.82 25.46 44.41 21.76 64.49 25.17 44.18 20.36 108.56 25.71 44.63 23.01 ForeFly (Ours) 79.80 28.86 52.87 25.19 62.07 26.49 53.25 22.70 96.51 31.09 52.51 27.54
+
+Table 2: Results on the TravelUAV Seen dataset. Human represents the performance of human operators under manual UAV control.
+The best results are bold.
+
+Method Full Easy Hard NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow NE \!\downarrow SR \!\uparrow OSR \!\uparrow SPL \!\uparrow Human 14.15 94.51 94.51 77.84 11.68 95.44 95.44 76.19 17.16 93.37 93.37 79.85 Random Action 222.20 0.14 0.21 0.07 142.07 0.26 0.39 0.13 320.12 0.00 0.00 0.00 Fixed Action 188.61 2.27 8.16 1.40 121.36 3.48 11.48 2.14 270.69 0.79 4.09 0.49 CMA Anderson et al. (2017) 135.73 8.37 18.72 7.90 84.89 11.48 24.52 10.68 197.77 4.57 11.65 4.51 TravelUAV Wang et al. (2025) 106.28 16.10 44.26 14.30 68.78 18.84 47.61 16.39 152.04 12.76 40.16 11.76 TravelUAV-DA Wang et al. (2025) 98.66 17.45 48.87 15.76 66.40 20.26 51.23 18.10 138.04 14.02 45.98 12.90 SimpleNav SimpleNav Contributors (2026) 85.60 22.40 55.10 20.50 60.00 22.80 56.90 21.00 118.30 22.00 52.80 19.90 NavFoM Zhang et al. (2026b) 93.05 29.17 49.24 25.03 58.98 32.91 53.16 27.87 143.83 23.58 43.40 20.80 AirForsight Liu et al. (2026c) 56.99 35.83 69.25 30.22 38.27 38.83 71.26 31.65 80.08 32.13 66.77 28.45 LongFly Jiang et al. (2025) 60.02 36.39 65.87 31.07 38.10 38.52 71.90 31.24 85.20 33.94 58.94 30.88 SpatialFly Jiang et al. (2026) 58.05 38.54 68.62 33.43 34.41 39.59 74.14 33.61 84.76 37.33 62.27 33.22 ForeFly (Ours) 48.74 41.75 70.25 34.75 34.49 44.55 71.36 35.72 66.16 38.33 68.89 33.55
+
+Results on TravelUAV Dataset. As shown in Tables 1 and 2 , ForeFly consistently achieves strong performance on both the Unseen and Seen splits.
+On the Unseen split, ForeFly reduces NE by 8.02 m and improves SR, OSR, and SPL by 3.40, 8.46, and 3.43 percentage points over SpatialFly, respectively, indicating improved generalization to unseen environments.
+The advantage is particularly pronounced on the Hard subset, where SR increases from 25.71% to 31.09%, highlighting its effectiveness on long-range navigation tasks.
+On the Seen split, ForeFly achieves the best overall performance among autonomous methods. Compared with SpatialFly, ForeFly improves SR by 3.21 and 4.96 percentage points on the Full and Easy subsets, respectively.
+Although its OSR on the Easy subset is slightly lower than that of SpatialFly, ForeFly improves OSR by 6.62 percentage points on the Hard subset, indicating a clearer advantage on more challenging long-range trajectories.
+
+Results on UAV-ON Dataset. As shown in Table 5 , ForeFly achieves the best performance across all metrics on both the Seen and Unseen splits. On the Seen split, ForeFly reaches 25.13% SR, 36.30% OSR, and 16.31% SPL, outperforming the strongest competing results by 2.41, 5.82, and 7.18 percentage points, respectively. On the Unseen split, ForeFly improves SR from 17.57% to 22.68%, yielding a 5.11 percentage-point gain, while also achieving the highest OSR of 31.44% and SPL of 14.59%. These consistent improvements across both splits further demonstrate the robustness and generalization ability of ForeFly beyond the TravelUAV benchmark.
+
+Table 3: Ablation study of the main components in ForeFly. Seen and Unseen represent the Test-seen and Test-unseen sets , respectively.
+
+Variant Proximal Foresight Route-Critical Foresight Foresight Query Priming Foresight-Guided Action Refinement Seen (Full) Unseen (Full) NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow Baseline \times \times \times \times 103.75 21.73 42.41 18.04 130.60 11.41 31.13 10.45 Proximal Only \checkmark \times \times \times 72.16 23.00 54.50 19.46 84.50 19.25 44.25 16.91 Route-Critical Only \times \checkmark \times \times 69.99 28.25 57.25 24.19 95.00 17.50 42.00 15.37 Dual-Horizon \checkmark \checkmark \times \times 70.06 32.75 62.00 27.54 84.14 21.75 44.53 16.29 + Foresight Query Priming \checkmark \checkmark \checkmark \times 64.41 33.08 62.91 27.99 81.82 23.61 45.36 19.73 ForeFly (Full) \checkmark \checkmark \checkmark \checkmark 48.74 41.75 70.25 34.75 79.80 28.86 52.87 25.19
+
+Table 4: Results on the UAV-ON dataset.
+
+Method Seen Unseen SR \uparrow OSR \uparrow SPL \uparrow SR \uparrow OSR \uparrow SPL \uparrow AerialVLN Liu et al. (2023) 4.55 16.84 4.24 3.51 20.77 3.41 AOA-F Xiao et al. (2025) 7.87 17.98 4.21 6.45 16.09 3.98 OpenFly Gao et al. (2026) 12.29 26.20 6.83 11.82 25.71 5.64 APEX Zhang et al. (2026a) 12.36 19.10 9.13 16.13 22.58 13.03 Navid Zhang et al. (2024) 14.17 30.08 7.19 10.70 28.51 5.99 OctMem-Agent Zhou et al. (2026) 22.72 30.48 8.40 17.57 28.59 5.15 ForeFly (Ours) 25.13 36.30 16.31 22.68 31.44 14.59
+
+Table 5: Ablation on Foresight-Guided Action Refinement (FGAR) Design.
+
+Method NE \downarrow SR \uparrow OSR \uparrow SPL \uparrow MLP Head 64.41 33.08 62.91 27.99 Direct Dual-Future* 62.03 34.00 62.50 28.73 FGAR w/o \mathbf{B}_{t}^{c} 54.61 38.35 68.73 32.55 FGAR 48.74 41.75 70.25 34.75
+
+Note: Direct Dual-Future Fusion refers to concatenating
+the proximal and route-critical future latents and using them to
+condition the action representation via cross-attention .
+
+Overall, the consistent gains across both TravelUAV and UAV-ON, particularly on unseen environments and challenging long-range trajectories, demonstrate the robustness and generalization of ForeFly for long-horizon AVLN. These improvements are consistent with the complementary dual-horizon foresight design, where proximal prediction preserves local motion continuity, while route-critical foresight provides strategic route-level anticipation. By integrating these future cues into waypoint generation through FGAR, ForeFly can reduce accumulated navigation errors and maintain better route consistency over extended trajectories.
+
+4.3 Ablation study
+
+As shown in Table 3 , we conduct a systematic ablation study to evaluate the contribution of each key component in ForeFly.
+We progressively examine the effects of proximal foresight, route-critical foresight, Dual-Memory Foresight Query Priming, and the Foresight-Guided Action Refinement on TravelUAV dataset, isolating their individual and complementary contributions.
+
+Effect of Dual-Horizon Foresight. We first examine the contribution of the two foresight horizons. Both Proximal Only and Route-Critical Only consistently outperform the baseline, confirming the benefit of explicitly modeling future states. Interestingly, Route-Critical Only yields larger gains on the Seen split, whereas Proximal Only performs better on the Unseen split. Combining the two horizons further improves SR to 32.75% and 21.75% on the Seen and Unseen splits, respectively. These results suggest that proximal and route-critical foresight provide complementary information at different navigation horizons rather than redundant predictions.
+
+Effect of Foresight Query Priming. We next examine whether grounding foresight queries in historical observations improves future-state modeling. Introducing retrospective priming consistently benefits both splits, with larger gains on the Unseen split, where SR increases from 21.75% to 23.61% and SPL from 16.29% to 19.73%. These results suggest that route-dependent historical cues enrich future-state prediction and improve foresight reliability in unseen environments.
+
+Effect of Foresight-Guided Action Refinement. Finally, we evaluate the effectiveness of incorporating predicted future representations into navigation decisions. Introducing FGAR substantially improves the retrospectively primed dual-horizon model, reducing NE from 64.41 m to 48.74 m and increasing SR from 33.08% to 41.75% on the Seen split. A similar improvement is observed on the Unseen split, where SR increases from 23.61% to 28.86%.
+The consistent gains across both splits confirm the effectiveness of future representations for action refinement.
+These results show that future-state prediction alone is insufficient, effectively conditioning action generation on the predicted futures is crucial for translating foresight into reliable navigation decisions.
+
+Ablation on Foresight-Guided Action Refinement Design. We further compare different strategies for incorporating dual-horizon foresight into action refinement.
+As shown in Table 5 , directly fusing the two future latents yields only modest improvements over the MLP head, suggesting that simply conditioning the action representation on future information is insufficient.
+In contrast, the asymmetric conditioning mechanism substantially improves performance, and the additional route-level guidance branch further strengthens all metrics.
+This validates the design choice of assigning different roles to proximal and route-critical foresight during action refinement.
+
+4.4 Qualitative Analysis
+
+Figure 3: Qualitative Results. (a) Bird’s-eye view of predicted trajectories.
+(b) 3D trajectory comparison showing improved route consistency of ForeFly.
+(c) Step-by-step navigation, where route-critical foresight helps ForeFly anticipate the upcoming turn, while the baseline deviates.
+The corresponding future visualization procedure is described in Sec. B.2 .
+
+Figure 3 presents a representative example comparing ForeFly with the baseline.
+As illustrated in Fig. 3 (a), the UAV is instructed to locate a red car near a riverbank after traversing the urban blocks.
+As shown in Fig. 3 (c), the baseline makes an incorrect decision at the critical turning point and consequently deviates from the intended route.
+In contrast, ForeFly internally anticipates a route-critical future latent associated with the upcoming route transition, providing strategic guidance for the waypoint decision and enabling the UAV to make the correct turn and ultimately reach the target.
+
+The trajectory comparisons in Fig. 3 (a,b) further illustrate this advantage.
+ForeFly generates a 220 m trajectory that closely follows the 226 m ground-truth route, while the baseline exhibits an early route deviation and fails to complete the navigation.
+These results highlight the complementary roles of the two foresight horizons: proximal foresight supports locally consistent waypoint generation, whereas route-critical foresight provides strategic guidance around important landmarks and turning regions. Together, they enable ForeFly to maintain both local motion continuity and long-horizon route consistency in complex aerial environments.
+
+5 Conclusion
+
+In this work, we introduced ForeFly, a dual-horizon latent world action model for aerial vision-language navigation.
+Rather than relying solely on reactive action prediction or single-horizon foresight, ForeFly explicitly anticipates both proximal future states for local motion continuity and route-critical future states for long-range guidance.
+A foresight query priming mechanism grounds these predictions in complementary historical cues, while the proposed Foresight-Guided Action Refinement (FGAR) asymmetrically integrates the two foresight horizons to preserve locally executable decisions while enabling strategic route-level correction.
+Experiments on the TravelUAV and UAV-ON benchmarks demonstrate consistent improvements over strong baselines on both seen and unseen environments, with particularly clear gains on challenging long-horizon trajectories. Ablation and qualitative analyses further validate the complementary roles of dual-horizon foresight, foresight query priming, and foresight-guided action refinement.
+
+Appendix A Implementation Details
+
+A.1 Route-Critical Anchors and Future Targets
+
+Anchor construction.
+
+Let a demonstration contain T states and let \mathbf{p}_{i}\in\mathbb{R}^{3} be the UAV position at state i . We first
+form an event-anchor set from the initial state, the terminal state, and every
+turning point whose angular change satisfies \alpha_{i}\geq\tau_{p} :
+
+\mathcal{E}=\{1,T\}\cup\left\{i\mid\alpha_{i}\geq\tau_{p}\right\}. (10)
+
+The initial state makes the construction well defined from the beginning of a
+trajectory, while the terminal state guarantees a future target for every
+non-terminal training state. Turning points alone can be sparse on a long
+straight segment. Therefore, for each pair of consecutive event anchors u<v , we add the state whose accumulated travel distance from u is closest
+to each multiple of \tau_{g} that lies strictly inside the interval:
+
+\displaystyle s(u,j) \displaystyle=\sum_{k=u+1}^{j}\left\|\mathbf{p}_{k}-\mathbf{p}_{k-1}\right\|_{2}, (11) \displaystyle j_{m}^{\star} \displaystyle=\operatorname*{arg\,min}_{u<j<v}\left|s(u,j)-m\tau_{g}\right|,\qquad 0<m\tau_{g}<s(u,v).
+
+Ties are resolved by choosing the earlier state, and duplicate indices caused
+by discrete sampling are removed. Sorting the union of event and coverage
+anchors gives the ordered set
+
+\mathcal{A}=\operatorname{sort}\left(\mathcal{E}\cup\{j_{m}^{\star}\}_{u,v,m}\right). (12)
+
+This construction preserves turning events while preventing the target
+horizon from becoming excessively long in event-sparse portions of a route.
+As illustrated in Fig. 4 , the resulting anchors capture
+turning events while maintaining coverage along trajectories of different
+lengths.
+In all experiments, \tau_{p}=20^{\circ} and \tau_{g}=30 m.
+
+Adaptive future target.
+
+For every non-terminal training state t<T , the next route-critical anchor is:
+
+a_{t}^{+}=\min\left\{a\in\mathcal{A}\mid a>t\right\},\qquad\kappa_{t}=a_{t}^{+}-t. (13)
+
+The two visual targets are consequently:
+
+\mathbf{Z}_{t+1}^{p,*}=\psi(o_{t+1}),\qquad\mathbf{Z}_{t+\kappa_{t}}^{c,*}=\psi(o_{a_{t}^{+}}). (14)
+
+The proximal branch is always trained against the immediately following
+observation. In contrast, the route-critical branch is trained against the
+next turning, coverage, or terminal anchor, so its temporal offset adapts to
+the geometry of the demonstrated route. Importantly, \kappa_{t} is a label
+construction variable rather than an input to the model. The notation t+\kappa_{t} describes which future state provides supervision; ForeFly is not
+given this offset at test time.
+
+A.2 Multi-View Perception and Historical Memory
+
+At each navigation step, the UAV receives five synchronized egocentric views,
+including front, rear, left, right, and down:
+
+o_{t}=\left\{o_{t}^{\mathrm{front}},o_{t}^{\mathrm{rear}},o_{t}^{\mathrm{left}},o_{t}^{\mathrm{right}},o_{t}^{\mathrm{down}}\right\}. (15)
+
+All five views are used for current perception, while historical memory stores
+only the front-view features. For each historical frame, the visual encoder
+produces one global token and 16 local tokens, \mathbf{x}_{i}^{\mathrm{front}}=[\mathbf{g}_{i};\mathbf{l}_{i,1},\ldots,\mathbf{l}_{i,16}] .
+The recent memory \mathcal{M}_{t}^{p} retains all 17 tokens from the latest R=5 front-view observations. Keeping both global and local tokens preserves
+the fine-grained appearance and spatial details needed to model short-term
+visual continuity. In contrast, the route-critical memory \mathcal{M}_{t}^{c} stores only the global token \mathbf{g}_{i} from each
+selected historical anchor, since its purpose is to summarize sparse
+route-level events rather than local visual details.
+
+Both memories are constructed from the executed trajectory prefix.
+In particular, a turning-point anchor becomes available only after the
+subsequent state required to determine its turning angle has been observed,
+and coverage anchors are likewise identified only from past executed states.
+Future anchors may therefore be used to define training targets, but never
+enter the model input before they become observable.
+
+At inference time, ForeFly is conditioned only on:
+
+\mathcal{C}_{t}^{\mathrm{in}}=\left(\mathcal{I},\mathcal{P}_{\leq t},o_{t},\mathcal{M}_{t}^{p},\mathcal{M}_{t}^{c}\right), (16)
+
+and does not access future observations, future anchor indices, or the adaptive
+offset \kappa_{t} , thereby preventing target leakage.
+
+Figure 4: Visualization of route-critical anchor construction. Representative UAV trajectories of different lengths are shown. Green and black stars mark the start and end states, red stars indicate key frames at turning points, and yellow diamonds denote distance anchors. The color scale represents the Euclidean distance from the starting position.
+
+A.3 Online Memory Update
+
+Algorithm 1 describes the online memory update procedure.
+After observing state t , only turns at indices i\leq t-1 can be
+confirmed. The current index t serves as a temporary coverage boundary,
+not as a known terminal anchor. Thus, distance anchors can be selected
+before the next turn is observed. Let D_{i} denote cumulative travel
+distance from the initial state, so that s(u,j)=D_{j}-D_{u} .
+
+Algorithm 1 Online update of recent and route-critical memories
+
+Appendix B Additional Experiment Results
+
+B.1 Quantitative Results on Unseen Map and Unseen Object Subsets
+
+Following the original TravelUAV evaluation protocol, the Unseen split consists of two subsets: Unseen Map and Unseen Object. The Unseen Map subset contains trajectories in previously unseen environments, while the Unseen Object subset contains trajectories with unseen goal objects.
+
+As shown in Fig. 5 , ForeFly consistently outperforms all comparison methods on both Unseen Map and Unseen Object across the evaluation metrics. On Unseen Map, the improvement is particularly pronounced in OSR, where ForeFly reaches 40.2% compared with 30.3% for LongFly, indicating stronger robustness to previously unseen environments. On Unseen Object, ForeFly also achieves consistent gains in navigation accuracy, success rate, and path efficiency. These results demonstrate that ForeFly generalizes effectively to both environmental and target-level distribution shifts.
+
+Figure 5: Results on TravelUAV Unseen Map and Unseen Object subsets. The top row compares ForeFly with existing methods on the Unseen Map subset, and the bottom row reports results on the Unseen Object subset.
+
+Figure 6: Qualitative visualization of dual-horizon future prediction. Each row shows two sampled waypoints from the same navigation trajectory. For each waypoint, we visualize the current observation together with the ground-truth and predicted proximal and route-critical futures.
+
+B.2 Qualitative Analysis of Dual-Horizon Foresight
+
+To further examine whether the predicted dual-horizon latents capture meaningful future states, we provide an image-space visualization of ForeFly’s foresight representations. Note that ForeFly itself predicts compact visual latents rather than RGB observations. For qualitative interpretation only, we employ an auxiliary latent-diffusion reconstructor that takes the predicted foresight representations as conditioning signals and reconstructs the corresponding future observations in image space. The reconstruction module is used solely for visualization and does not participate in navigation decision making.
+Since the reconstruction is produced by an auxiliary generative model, its visual fidelity depends on both the quality of the predicted foresight representations and the capacity of the reconstructor. Therefore, these visualizations should be interpreted as qualitative evidence of the semantic and spatial information retained in the predicted representations, rather than as direct pixel-level future prediction.
+
+As shown in Fig. 6 , each row presents two sampled waypoints
+from the same navigation trajectory. At each waypoint, we visualize the current
+observation together with the ground-truth and reconstructed proximal and
+route-critical futures. The proximal predictions largely preserve the local
+scene layout and viewpoint continuity, whereas the route-critical predictions
+exhibit more pronounced changes in scene composition, reflecting farther
+route progression.
+
+Across all three cases, the reconstructed futures remain broadly consistent
+with the corresponding ground-truth observations in their dominant spatial
+and semantic structures. Moreover, the predictions evolve with the navigation
+progress rather than collapsing to a fixed future pattern. These results
+qualitatively demonstrate the complementary roles of the two foresight
+horizons: proximal foresight captures short-term scene evolution, while
+route-critical foresight anticipates longer-range navigation-relevant changes.
+
+Appendix C Limitations and Future Directions
+
+ForeFly has several limitations that define directions for future work. First,
+route-critical targets depend on turning and distance heuristics. The fixed
+thresholds work well on TravelUAV, but different vehicle dynamics, sampling
+rates, or environment scales may require recalibration or a learned event
+detector. Second, each state is paired with one demonstrated future. The
+squared latent objective does not explicitly represent multiple valid futures
+when several routes satisfy an instruction. Probabilistic latent prediction
+would be a natural extension. Third, retrospective memory is built from the
+executed trajectory and can inherit errors after route deviation. Explicit
+uncertainty estimates or memory recovery mechanisms could improve robustness
+in such cases.
+
+Real-world UAV experiments are important for validating practical applicability,
+but large-scale aerial evaluation is constrained by safety, regulatory
+compliance, privacy, and site-access requirements. Following the standard AVLN
+protocol, we evaluate ForeFly on TravelUAV and UAV-ON, which provide diverse
+large-scale outdoor environments, realistic visual observations, and seen/unseen
+settings for controlled and reproducible evaluation. Existing methods such as
+SimpleNav, NavFoM, AirForsight, LongFly, and SpatialFly are also primarily
+evaluated in simulation, enabling fair comparison under a common protocol.
+Future work will further investigate sim-to-real transfer and physical UAV
+deployment to assess ForeFly under real-world conditions.
